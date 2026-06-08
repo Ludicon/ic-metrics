@@ -103,6 +103,13 @@ IC_VAR_INT(ssimu2_blur_wrap_mode, BlurWrapMode_ClampEdge);
 
 namespace {
 
+// Pointer-sized signed/unsigned integers for indexing — short aliases used
+// throughout this file. Local to ic_ssimulacra2.cc on purpose; not exposed
+// in any public header. If we ever target a non-64-bit platform, change
+// these here and we're done.
+typedef intptr_t  isize;
+typedef uintptr_t usize;
+
 // Internal aggregate; not part of the public API.
 struct MsssimScale {
   double avg_ssim[3 * 2];
@@ -482,15 +489,15 @@ inline void GaussianKernel(int radius, float sigma, float* kernel) {
 
 // Sample at index xi using the chosen wrap policy. The interior loop never
 // calls this; only the border loops do.
-static inline float sample_h(const float* JXL_RESTRICT row, int xi, int w, int mode) {
+static inline float sample_h(const float* JXL_RESTRICT row, isize xi, isize w, int mode) {
   if (xi >= 0 && xi < w) return row[xi];
   if (mode == BlurWrapMode_ClampBorder) return 0.0f;
   if (mode == BlurWrapMode_Mirror) {
     // RAD mirror with edge repeat: pixel[-1] = pixel[0], pixel[w] = pixel[w-1].
-    int mxi = (xi < 0) ? (-xi - 1) : (2 * w - xi - 1);
-    return row[clamp(mxi, 0, w - 1)]; // extra clamp protects tiny w
+    isize mxi = (xi < 0) ? (-xi - 1) : (2 * w - xi - 1);
+    return row[clamp(mxi, (isize)0, w - 1)]; // extra clamp protects tiny w
   }
-  return row[clamp(xi, 0, w - 1)]; // ClampEdge
+  return row[clamp(xi, (isize)0, w - 1)]; // ClampEdge
 }
 
 
@@ -563,8 +570,8 @@ IC_FORCEINLINE f32x8 fma(f32x8 acc, f32x8 v, float s) {
 
 
 static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const float* JXL_RESTRICT kernel) {
-  const intptr_t w = in.xsize();
-  const intptr_t h = in.ysize();
+  const isize w = in.xsize();
+  const isize h = in.ysize();
   const int mode = var::ssimu2_blur_wrap_mode;
 
   // Snapshot the right half of the symmetric kernel into a stack array.
@@ -575,18 +582,18 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
   float kloc[R + 1];
   for (int i = 0; i <= R; ++i) kloc[i] = kernel[R + i];
 
-  for (intptr_t y = 0; y < h; ++y) {
+  for (isize y = 0; y < h; ++y) {
     const float* JXL_RESTRICT rowp = in.Row(y);
     float* JXL_RESTRICT rowout = out->Row(y);
-    intptr_t x = 0;
+    isize x = 0;
 
     // Left border: [0, min(R, w)). Uses sample_h for off-image taps.
-    const intptr_t x_left_end = min((intptr_t)R, w);
+    const isize x_left_end = min((isize)R, w);
     for (; x < x_left_end; ++x) {
-      float sum = kloc[0] * sample_h(rowp, (int)x, (int)w, mode);
+      float sum = kloc[0] * sample_h(rowp, x, w, mode);
       for (int i = 1; i <= R; ++i) {
-        const float l = sample_h(rowp, (int)x - i, (int)w, mode);
-        const float right = sample_h(rowp, (int)x + i, (int)w, mode);
+        const float l = sample_h(rowp, x - i, w, mode);
+        const float right = sample_h(rowp, x + i, w, mode);
         sum += kloc[i] * (l + right);
       }
       rowout[x] = sum;
@@ -619,10 +626,10 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
 
     // Right border (and NEON interior remainder): from wherever we stopped to w.
     for (; x < w; ++x) {
-      float sum = kloc[0] * sample_h(rowp, (int)x, (int)w, mode);
+      float sum = kloc[0] * sample_h(rowp, x, w, mode);
       for (int i = 1; i <= R; ++i) {
-        const float l = sample_h(rowp, (int)x - i, (int)w, mode);
-        const float right = sample_h(rowp, (int)x + i, (int)w, mode);
+        const float l = sample_h(rowp, x - i, w, mode);
+        const float right = sample_h(rowp, x + i, w, mode);
         sum += kloc[i] * (l + right);
       }
       rowout[x] = sum;
@@ -632,26 +639,26 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
 
 // Map a (possibly out-of-bounds) row index to an in-bounds one per wrap mode.
 // Returns -1 for ClampBorder when out-of-bounds (caller treats that as 0.0f).
-static inline int sample_v_row(int yi, int h, int mode) {
+static inline isize sample_v_row(isize yi, isize h, int mode) {
   if (yi >= 0 && yi < h) return yi;
   if (mode == BlurWrapMode_ClampBorder) return -1;
   if (mode == BlurWrapMode_Mirror) {
-    int myi = (yi < 0) ? (-yi - 1) : (2 * h - yi - 1);
-    return clamp(myi, 0, h - 1);
+    isize myi = (yi < 0) ? (-yi - 1) : (2 * h - yi - 1);
+    return clamp(myi, (isize)0, h - 1);
   }
-  return clamp(yi, 0, h - 1); // ClampEdge
+  return clamp(yi, (isize)0, h - 1); // ClampEdge
 }
 
 // Resolve a (possibly OOB) row index into either a row pointer or null
 // (for ClampBorder out-of-bounds), per wrap mode.
-static inline const float* v_row(const ImageF& in, int yi, int h, int mode) {
-  int row = sample_v_row(yi, h, mode);
+static inline const float* v_row(const ImageF& in, isize yi, isize h, int mode) {
+  isize row = sample_v_row(yi, h, mode);
   return (row < 0) ? nullptr : in.Row(row);
 }
 
 static void ConvolveVertical(const ImageF& in, ImageF* JXL_RESTRICT out, const float* JXL_RESTRICT kernel) {
-  const intptr_t w = in.xsize();
-  const intptr_t h = in.ysize();
+  const isize w = in.xsize();
+  const isize h = in.ysize();
   const int mode = var::ssimu2_blur_wrap_mode;
 
   // See ConvolveHorizontal for rationale.
@@ -667,17 +674,17 @@ static void ConvolveVertical(const ImageF& in, ImageF* JXL_RESTRICT out, const f
   //   strip=128: 812 ms   strip=1024: 753 ms   no-strip: 727 ms
   // If you ever bench on much larger images, re-run the sweep.
   {
-    const intptr_t x0 = 0;
-    const intptr_t x1 = w;
+    const isize x0 = 0;
+    const isize x1 = w;
 
     // Top border.
-    for (intptr_t y = 0; y < min((intptr_t)R, h); ++y) {
+    for (isize y = 0; y < min((isize)R, h); ++y) {
       float* JXL_RESTRICT rowout = out->Row(y);
-      for (intptr_t x = x0; x < x1; ++x) {
+      for (isize x = x0; x < x1; ++x) {
         float sum = kloc[0] * in.Row(y)[x];
         for (int i = 1; i <= R; ++i) {
-          const float* r_up   = v_row(in, (int)y - i, (int)h, mode);
-          const float* r_down = v_row(in, (int)y + i, (int)h, mode);
+          const float* r_up   = v_row(in, y - i, h, mode);
+          const float* r_down = v_row(in, y + i, h, mode);
           float v_up   = r_up   ? r_up[x]   : 0.0f;
           float v_down = r_down ? r_down[x] : 0.0f;
           sum += kloc[i] * (v_up + v_down);
@@ -687,10 +694,10 @@ static void ConvolveVertical(const ImageF& in, ImageF* JXL_RESTRICT out, const f
     }
 
     // Interior: no bounds checks.
-    for (intptr_t y = R; y < h - R; ++y) {
+    for (isize y = R; y < h - R; ++y) {
       float* JXL_RESTRICT rowout = out->Row(y);
       const float* JXL_RESTRICT row_c = in.Row(y);
-      intptr_t x = x0;
+      isize x = x0;
 #if IC_HAS_F32X8
       if (var::ssimu2_blur_simd) {
         // Row pointers hoisted once per y; inner i loop unrolls with R constexpr.
@@ -719,13 +726,13 @@ static void ConvolveVertical(const ImageF& in, ImageF* JXL_RESTRICT out, const f
     }
 
     // Bottom border.
-    for (intptr_t y = max(h - R, (intptr_t)R); y < h; ++y) {
+    for (isize y = max(h - R, (isize)R); y < h; ++y) {
       float* JXL_RESTRICT rowout = out->Row(y);
-      for (intptr_t x = x0; x < x1; ++x) {
+      for (isize x = x0; x < x1; ++x) {
         float sum = kloc[0] * in.Row(y)[x];
         for (int i = 1; i <= R; ++i) {
-          const float* r_up   = v_row(in, (int)y - i, (int)h, mode);
-          const float* r_down = v_row(in, (int)y + i, (int)h, mode);
+          const float* r_up   = v_row(in, y - i, h, mode);
+          const float* r_down = v_row(in, y + i, h, mode);
           float v_up   = r_up   ? r_up[x]   : 0.0f;
           float v_down = r_down ? r_down[x] : 0.0f;
           sum += kloc[i] * (v_up + v_down);
@@ -962,8 +969,8 @@ static void EdgeDiffMap(const Image3F &img1, const Image3F &mu1, const Image3F &
         sum1[3] += detail_lost4;
 
         if (error_row) {
-          error_row[x] += w_artif  * abs(artifact)
-                        + w_detail * abs(detail_lost);
+          error_row[x] += w_artif  * fabsf(artifact)
+                        + w_detail * fabsf(detail_lost);
           JXL_CHECK(isfinite(error_row[x]));
         }
       }
