@@ -1281,13 +1281,20 @@ double ComputeSSIMScore(int w, int h, const unsigned char* orig, const unsigned 
   ImageF img1(w, h);
   ImageF img2(w, h);
 
-  // Convert to [0,1] float.
+  // RGBA8 → Rec.601 luma in [0,1]. Standard SSIM operates on
+  // gamma-corrected luma (i.e. the sRGB bytes directly, no
+  // linearization).
+  constexpr float kR = 0.299f / 255.0f;
+  constexpr float kG = 0.587f / 255.0f;
+  constexpr float kB = 0.114f / 255.0f;
   for (int y = 0; y < h; y++) {
     float* row1 = img1.Row(y);
     float* row2 = img2.Row(y);
+    const unsigned char* p1 = orig + y * w * 4;
+    const unsigned char* p2 = dist + y * w * 4;
     for (int x = 0; x < w; x++) {
-      row1[x] = float(orig[y * w + x]) / 255.0f;
-      row2[x] = float(dist[y * w + x]) / 255.0f;
+      row1[x] = kR * p1[4*x + 0] + kG * p1[4*x + 1] + kB * p1[4*x + 2];
+      row2[x] = kR * p2[4*x + 0] + kG * p2[4*x + 1] + kB * p2[4*x + 2];
     }
   }
 
