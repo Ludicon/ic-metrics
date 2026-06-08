@@ -482,22 +482,36 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
   const intptr_t w = in.xsize();
   const intptr_t h = in.ysize();
   const int mode = var::ssimu2_blur_wrap_mode;
+  const bool symm = var::ssimu2_blur_symmetric_kernel;
 
   for (intptr_t y = 0; y < h; ++y) {
     const float* JXL_RESTRICT rowp = in.Row(y);
     float* JXL_RESTRICT rowout = out->Row(y);
 
     // Left border.
-    for (intptr_t x = 0; x < min((intptr_t)r, w); ++x) {
-      float sum = 0.0f;
-      for (int i = -r; i <= r; ++i) {
-        sum += sample_h(rowp, (int)x + i, (int)w, mode) * kernel[i + r];
+    if (symm) {
+      for (intptr_t x = 0; x < min((intptr_t)r, w); ++x) {
+        float sum = kernel[r] * sample_h(rowp, (int)x, (int)w, mode);
+        for (int i = 1; i <= r; ++i) {
+          const float l = sample_h(rowp, (int)x - i, (int)w, mode);
+          const float right = sample_h(rowp, (int)x + i, (int)w, mode);
+          sum += kernel[r + i] * (l + right);
+        }
+        rowout[x] = sum;
       }
-      rowout[x] = sum;
+    }
+    else {
+      for (intptr_t x = 0; x < min((intptr_t)r, w); ++x) {
+        float sum = 0.0f;
+        for (int i = -r; i <= r; ++i) {
+          sum += sample_h(rowp, (int)x + i, (int)w, mode) * kernel[i + r];
+        }
+        rowout[x] = sum;
+      }
     }
 
     // Interior: no bounds checks needed.
-    if (var::ssimu2_blur_symmetric_kernel) {
+    if (symm) {
       for (intptr_t x = r; x < w - r; ++x) {
         float sum = kernel[r] * rowp[x];
         for (int i = 1; i <= r; ++i) {
@@ -517,12 +531,25 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
     }
 
     // Right border.
-    for (intptr_t x = max(w - r, (intptr_t)r); x < w; ++x) {
-      float sum = 0.0f;
-      for (int i = -r; i <= r; ++i) {
-        sum += sample_h(rowp, (int)x + i, (int)w, mode) * kernel[i + r];
+    if (symm) {
+      for (intptr_t x = max(w - r, (intptr_t)r); x < w; ++x) {
+        float sum = kernel[r] * sample_h(rowp, (int)x, (int)w, mode);
+        for (int i = 1; i <= r; ++i) {
+          const float l = sample_h(rowp, (int)x - i, (int)w, mode);
+          const float right = sample_h(rowp, (int)x + i, (int)w, mode);
+          sum += kernel[r + i] * (l + right);
+        }
+        rowout[x] = sum;
       }
-      rowout[x] = sum;
+    }
+    else {
+      for (intptr_t x = max(w - r, (intptr_t)r); x < w; ++x) {
+        float sum = 0.0f;
+        for (int i = -r; i <= r; ++i) {
+          sum += sample_h(rowp, (int)x + i, (int)w, mode) * kernel[i + r];
+        }
+        rowout[x] = sum;
+      }
     }
   }
 }
@@ -539,10 +566,18 @@ static inline int sample_v_row(int yi, int h, int mode) {
   return clamp(yi, 0, h - 1); // ClampEdge
 }
 
+// Resolve a (possibly OOB) row index into either a row pointer or null
+// (for ClampBorder out-of-bounds), per wrap mode.
+static inline const float* v_row(const ImageF& in, int yi, int h, int mode) {
+  int row = sample_v_row(yi, h, mode);
+  return (row < 0) ? nullptr : in.Row(row);
+}
+
 static void ConvolveVertical(const ImageF& in, ImageF* JXL_RESTRICT out, const float* JXL_RESTRICT kernel, int r) {
   const intptr_t w = in.xsize();
   const intptr_t h = in.ysize();
   const int mode = var::ssimu2_blur_wrap_mode;
+  const bool symm = var::ssimu2_blur_symmetric_kernel;
 
   // Process in vertical strips for cache locality.
   const intptr_t kStripWidth = 64;
@@ -551,21 +586,39 @@ static void ConvolveVertical(const ImageF& in, ImageF* JXL_RESTRICT out, const f
     const intptr_t x1 = min(x0 + kStripWidth, w);
 
     // Top border.
-    for (intptr_t y = 0; y < min((intptr_t)r, h); ++y) {
-      float* JXL_RESTRICT rowout = out->Row(y);
-      for (intptr_t x = x0; x < x1; ++x) {
-        float sum = 0.0f;
-        for (int i = -r; i <= r; ++i) {
-          int row = sample_v_row((int)y + i, (int)h, mode);
-          float v = (row < 0) ? 0.0f : in.Row(row)[x];
-          sum += v * kernel[i + r];
+    if (symm) {
+      for (intptr_t y = 0; y < min((intptr_t)r, h); ++y) {
+        float* JXL_RESTRICT rowout = out->Row(y);
+        for (intptr_t x = x0; x < x1; ++x) {
+          float sum = kernel[r] * in.Row(y)[x];
+          for (int i = 1; i <= r; ++i) {
+            const float* r_up   = v_row(in, (int)y - i, (int)h, mode);
+            const float* r_down = v_row(in, (int)y + i, (int)h, mode);
+            float v_up   = r_up   ? r_up[x]   : 0.0f;
+            float v_down = r_down ? r_down[x] : 0.0f;
+            sum += kernel[r + i] * (v_up + v_down);
+          }
+          rowout[x] = sum;
         }
-        rowout[x] = sum;
+      }
+    }
+    else {
+      for (intptr_t y = 0; y < min((intptr_t)r, h); ++y) {
+        float* JXL_RESTRICT rowout = out->Row(y);
+        for (intptr_t x = x0; x < x1; ++x) {
+          float sum = 0.0f;
+          for (int i = -r; i <= r; ++i) {
+            const float* row = v_row(in, (int)y + i, (int)h, mode);
+            float v = row ? row[x] : 0.0f;
+            sum += v * kernel[i + r];
+          }
+          rowout[x] = sum;
+        }
       }
     }
 
     // Interior: no bounds checks.
-    if (var::ssimu2_blur_symmetric_kernel) {
+    if (symm) {
       for (intptr_t y = r; y < h - r; ++y) {
         float* JXL_RESTRICT rowout = out->Row(y);
         const float* JXL_RESTRICT row_c = in.Row(y);
@@ -592,16 +645,34 @@ static void ConvolveVertical(const ImageF& in, ImageF* JXL_RESTRICT out, const f
     }
 
     // Bottom border.
-    for (intptr_t y = max(h - r, (intptr_t)r); y < h; ++y) {
-      float* JXL_RESTRICT rowout = out->Row(y);
-      for (intptr_t x = x0; x < x1; ++x) {
-        float sum = 0.0f;
-        for (int i = -r; i <= r; ++i) {
-          int row = sample_v_row((int)y + i, (int)h, mode);
-          float v = (row < 0) ? 0.0f : in.Row(row)[x];
-          sum += v * kernel[i + r];
+    if (symm) {
+      for (intptr_t y = max(h - r, (intptr_t)r); y < h; ++y) {
+        float* JXL_RESTRICT rowout = out->Row(y);
+        for (intptr_t x = x0; x < x1; ++x) {
+          float sum = kernel[r] * in.Row(y)[x];
+          for (int i = 1; i <= r; ++i) {
+            const float* r_up   = v_row(in, (int)y - i, (int)h, mode);
+            const float* r_down = v_row(in, (int)y + i, (int)h, mode);
+            float v_up   = r_up   ? r_up[x]   : 0.0f;
+            float v_down = r_down ? r_down[x] : 0.0f;
+            sum += kernel[r + i] * (v_up + v_down);
+          }
+          rowout[x] = sum;
         }
-        rowout[x] = sum;
+      }
+    }
+    else {
+      for (intptr_t y = max(h - r, (intptr_t)r); y < h; ++y) {
+        float* JXL_RESTRICT rowout = out->Row(y);
+        for (intptr_t x = x0; x < x1; ++x) {
+          float sum = 0.0f;
+          for (int i = -r; i <= r; ++i) {
+            const float* row = v_row(in, (int)y + i, (int)h, mode);
+            float v = row ? row[x] : 0.0f;
+            sum += v * kernel[i + r];
+          }
+          rowout[x] = sum;
+        }
       }
     }
   }
