@@ -22,6 +22,8 @@ endif()
 add_library(ic_metrics STATIC
     src/ic_ssimulacra2.cc
     src/ic_ssimulacra2.h
+    src/ic_vars.cpp
+    src/ic_vars.h
     src/ic_shared.h
 )
 target_include_directories(ic_metrics PUBLIC src)
