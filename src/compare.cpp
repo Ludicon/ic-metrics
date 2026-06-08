@@ -24,6 +24,7 @@
 
 #include "ic_ssimulacra2.h"
 #include "ic_shared.h"
+#include "impls.h"
 
 #include <glob.h>
 #include <stdio.h>
@@ -103,7 +104,44 @@ static u8* jpeg_distort(const u8* rgba, int w, int h, int quality) {
 
 
 ////////////////////////////////
+// Impl table
+
+typedef double (*ScoreFn)(int w, int h, const u8* orig, const u8* dist);
+
+static double ours_compute_score(int w, int h, const u8* orig, const u8* dist) {
+    return ComputeSSIMULACRA2Score(w, h, orig, dist);
+}
+
+struct Impl {
+    const char* name;
+    ScoreFn fn;
+};
+
+static const Impl IMPLS[] = {
+    { "ours", ours_compute_score },
+#if HAVE_FSSIMU2
+    { "fssimu2", fssimu2_compute_score },
+#endif
+#if HAVE_RUST_AV
+    { "rust-av", rust_av_compute_score },
+#endif
+#if HAVE_CLOUDINARY
+    { "cloudinary", cloudinary_compute_score },
+#endif
+};
+static const int NUM_IMPLS = (int)(sizeof(IMPLS) / sizeof(IMPLS[0]));
+
+
+////////////////////////////////
 // Per-image processing
+
+static void emit_row(const char* image, const char* distortion, const u8* orig, const u8* dist, int w, int h) {
+    for (int i = 0; i < NUM_IMPLS; i++) {
+        double s = IMPLS[i].fn(w, h, orig, dist);
+        printf("%s,%s,%s,%.6f\n", image, IMPLS[i].name, distortion, s);
+        fflush(stdout);
+    }
+}
 
 static void process_image(const char* path) {
     int w, h, c;
@@ -116,12 +154,8 @@ static void process_image(const char* path) {
 
     const char* name = basename_ptr(path);
 
-    // self vs self — sanity check, should print 100.0
-    {
-        double s = ComputeSSIMULACRA2Score(w, h, orig, orig);
-        printf("%s,ours,self,%.6f\n", name, s);
-        fflush(stdout);
-    }
+    // self vs self — sanity check, should print ~100
+    emit_row(name, "self", orig, orig, w, h);
 
     static const int qualities[] = { 40, 70, 90 };
     for (int i = 0; i < (int)(sizeof(qualities) / sizeof(qualities[0])); i++) {
@@ -133,9 +167,9 @@ static void process_image(const char* path) {
         }
         defer { stbi_image_free(dist); };
 
-        double s = ComputeSSIMULACRA2Score(w, h, orig, dist);
-        printf("%s,ours,jpeg-q%d,%.6f\n", name, q, s);
-        fflush(stdout);
+        char distortion[16];
+        snprintf(distortion, sizeof(distortion), "jpeg-q%d", q);
+        emit_row(name, distortion, orig, dist, w, h);
     }
 }
 
