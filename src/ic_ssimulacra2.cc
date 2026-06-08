@@ -84,15 +84,7 @@ enum BlurWrapMode {
 };
 IC_VAR_INT(ssimu2_blur_wrap_mode, BlurWrapMode_ClampEdge);
 
-// Use the symmetric form of the FIR convolution:
-//   sum = k[0]*src[x] + sum_{i=1..r} k[i] * (src[x+i] + src[x-i]).
-// Math-identical to the naive form for a symmetric kernel. Measured ~1.20×
-// faster on Apple M-series despite identical FP op count — half the kernel
-// loads and a shorter accumulator chain win in practice.
-IC_VAR_BOOL(ssimu2_blur_symmetric_kernel, true);
-
-// Use arm_neon intrinsics in the symmetric interior. Only effective when the
-// symmetric form is also enabled.
+// Use arm_neon intrinsics in the blur interior.
 #if IC_CPU_ARM64
     IC_VAR_BOOL(ssimu2_blur_neon, true);
 #else
@@ -252,7 +244,6 @@ struct Image3F {
   ImageF planes[3];
 };
 
-static bool SameSize(const ImageF& a, const ImageF& b) { return a.xsize() == b.xsize() && a.ysize() == b.ysize(); }
 static bool SameSize(const Image3F& a, const Image3F& b) { return a.xsize() == b.xsize() && a.ysize() == b.ysize(); }
 
 
@@ -494,20 +485,16 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
   const intptr_t w = in.xsize();
   const intptr_t h = in.ysize();
   const int mode = var::ssimu2_blur_wrap_mode;
-  const bool symm = var::ssimu2_blur_symmetric_kernel;
 
 #if IC_CPU_ARM64
-  // Snapshot the kernel into locals so the compiler keeps them in NEON
-  // scalar registers (via vfmaq_n_f32) across the row loop. With just
-  // JXL_RESTRICT the loads weren't hoisting — measured ~5% slower.
-  // The NEON path below is hardcoded to r=5 (the only r we currently use).
-  JXL_CHECK(r == 5);
-  const float k0 = kernel[r];
-  const float k1 = kernel[r + 1];
-  const float k2 = kernel[r + 2];
-  const float k3 = kernel[r + 3];
-  const float k4 = kernel[r + 4];
-  const float k5 = kernel[r + 5];
+  // Snapshot the right half of the symmetric kernel into a stack array.
+  // With just JXL_RESTRICT the compiler was reloading kernel[r+i] every
+  // iteration — measured ~5% slower. With R constexpr, the i loops below
+  // unroll cleanly.
+  constexpr int R = 5;
+  JXL_CHECK(r == R);
+  float kloc[R + 1];
+  for (int i = 0; i <= R; ++i) kloc[i] = kernel[R + i];
 #endif
 
   for (intptr_t y = 0; y < h; ++y) {
@@ -515,60 +502,41 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
     float* JXL_RESTRICT rowout = out->Row(y);
     intptr_t x = 0;
 
-    // Left border: [0, min(r, w)).
+    // Left border: [0, min(r, w)). Uses sample_h for off-image taps.
     const intptr_t x_left_end = min((intptr_t)r, w);
-    if (symm) {
-      for (; x < x_left_end; ++x) {
-        float sum = kernel[r] * sample_h(rowp, (int)x, (int)w, mode);
-        for (int i = 1; i <= r; ++i) {
-          const float l = sample_h(rowp, (int)x - i, (int)w, mode);
-          const float right = sample_h(rowp, (int)x + i, (int)w, mode);
-          sum += kernel[r + i] * (l + right);
-        }
-        rowout[x] = sum;
+    for (; x < x_left_end; ++x) {
+      float sum = kernel[r] * sample_h(rowp, (int)x, (int)w, mode);
+      for (int i = 1; i <= r; ++i) {
+        const float l = sample_h(rowp, (int)x - i, (int)w, mode);
+        const float right = sample_h(rowp, (int)x + i, (int)w, mode);
+        sum += kernel[r + i] * (l + right);
       }
-    }
-    else {
-      for (; x < x_left_end; ++x) {
-        float sum = 0.0f;
-        for (int i = -r; i <= r; ++i) {
-          sum += sample_h(rowp, (int)x + i, (int)w, mode) * kernel[i + r];
-        }
-        rowout[x] = sum;
-      }
+      rowout[x] = sum;
     }
 
     // Interior: x ∈ [r, w-r), no bounds checks needed.
 #if IC_CPU_ARM64
-    if (symm && var::ssimu2_blur_neon) {
+    if (var::ssimu2_blur_neon) {
       // 8-wide (2x NEON, maps to 1x AVX2 256-bit). Up to 7 leftover pixels
-      // fall through to the right-border loop, which handles them with
-      // sample_h at negligible cost (<0.15% of total).
-      // Note: this NEON path is hardcoded to r=5 (the only r currently used).
+      // fall through to the right-border loop (sample_h, ~0.15% overhead).
       for (; x + 7 < w - r; x += 8) {
-        float32x4_t sum0 = vmulq_n_f32(vld1q_f32(rowp + x),     k0);
-        float32x4_t sum1 = vmulq_n_f32(vld1q_f32(rowp + x + 4), k0);
-        #define IC_TAP(I, K) do { \
-          float32x4_t l0 = vld1q_f32(rowp + x - (I)); \
-          float32x4_t r0 = vld1q_f32(rowp + x + (I)); \
-          float32x4_t l1 = vld1q_f32(rowp + x + 4 - (I)); \
-          float32x4_t r1 = vld1q_f32(rowp + x + 4 + (I)); \
-          sum0 = vfmaq_n_f32(sum0, vaddq_f32(l0, r0), (K)); \
-          sum1 = vfmaq_n_f32(sum1, vaddq_f32(l1, r1), (K)); \
-        } while (0)
-        IC_TAP(1, k1);
-        IC_TAP(2, k2);
-        IC_TAP(3, k3);
-        IC_TAP(4, k4);
-        IC_TAP(5, k5);
-        #undef IC_TAP
+        float32x4_t sum0 = vmulq_n_f32(vld1q_f32(rowp + x),     kloc[0]);
+        float32x4_t sum1 = vmulq_n_f32(vld1q_f32(rowp + x + 4), kloc[0]);
+        for (int i = 1; i <= R; ++i) {
+          float32x4_t l0 = vld1q_f32(rowp + x - i);
+          float32x4_t r0 = vld1q_f32(rowp + x + i);
+          float32x4_t l1 = vld1q_f32(rowp + x + 4 - i);
+          float32x4_t r1 = vld1q_f32(rowp + x + 4 + i);
+          sum0 = vfmaq_n_f32(sum0, vaddq_f32(l0, r0), kloc[i]);
+          sum1 = vfmaq_n_f32(sum1, vaddq_f32(l1, r1), kloc[i]);
+        }
         vst1q_f32(rowout + x,     sum0);
         vst1q_f32(rowout + x + 4, sum1);
       }
     }
     else
 #endif
-    if (symm) {
+    {
       for (; x < w - r; ++x) {
         float sum = kernel[r] * rowp[x];
         for (int i = 1; i <= r; ++i) {
@@ -577,36 +545,16 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
         rowout[x] = sum;
       }
     }
-    else {
-      for (; x < w - r; ++x) {
-        float sum = 0.0f;
-        for (int i = -r; i <= r; ++i) {
-          sum += rowp[x + i] * kernel[i + r];
-        }
-        rowout[x] = sum;
-      }
-    }
 
-    // Right border: from wherever we stopped to w.
-    if (symm) {
-      for (; x < w; ++x) {
-        float sum = kernel[r] * sample_h(rowp, (int)x, (int)w, mode);
-        for (int i = 1; i <= r; ++i) {
-          const float l = sample_h(rowp, (int)x - i, (int)w, mode);
-          const float right = sample_h(rowp, (int)x + i, (int)w, mode);
-          sum += kernel[r + i] * (l + right);
-        }
-        rowout[x] = sum;
+    // Right border (and NEON interior remainder): from wherever we stopped to w.
+    for (; x < w; ++x) {
+      float sum = kernel[r] * sample_h(rowp, (int)x, (int)w, mode);
+      for (int i = 1; i <= r; ++i) {
+        const float l = sample_h(rowp, (int)x - i, (int)w, mode);
+        const float right = sample_h(rowp, (int)x + i, (int)w, mode);
+        sum += kernel[r + i] * (l + right);
       }
-    }
-    else {
-      for (; x < w; ++x) {
-        float sum = 0.0f;
-        for (int i = -r; i <= r; ++i) {
-          sum += sample_h(rowp, (int)x + i, (int)w, mode) * kernel[i + r];
-        }
-        rowout[x] = sum;
-      }
+      rowout[x] = sum;
     }
   }
 }
@@ -634,17 +582,12 @@ static void ConvolveVertical(const ImageF& in, ImageF* JXL_RESTRICT out, const f
   const intptr_t w = in.xsize();
   const intptr_t h = in.ysize();
   const int mode = var::ssimu2_blur_wrap_mode;
-  const bool symm = var::ssimu2_blur_symmetric_kernel;
 
 #if IC_CPU_ARM64
-  // See note in ConvolveHorizontal — locals avoid per-iteration kernel loads.
-  JXL_CHECK(r == 5);
-  const float k0 = kernel[r];
-  const float k1 = kernel[r + 1];
-  const float k2 = kernel[r + 2];
-  const float k3 = kernel[r + 3];
-  const float k4 = kernel[r + 4];
-  const float k5 = kernel[r + 5];
+  constexpr int R = 5;
+  JXL_CHECK(r == R);
+  float kloc[R + 1];
+  for (int i = 0; i <= R; ++i) kloc[i] = kernel[R + i];
 #endif
 
   // Process in vertical strips for cache locality.
@@ -654,130 +597,75 @@ static void ConvolveVertical(const ImageF& in, ImageF* JXL_RESTRICT out, const f
     const intptr_t x1 = min(x0 + kStripWidth, w);
 
     // Top border.
-    if (symm) {
-      for (intptr_t y = 0; y < min((intptr_t)r, h); ++y) {
-        float* JXL_RESTRICT rowout = out->Row(y);
-        for (intptr_t x = x0; x < x1; ++x) {
-          float sum = kernel[r] * in.Row(y)[x];
-          for (int i = 1; i <= r; ++i) {
-            const float* r_up   = v_row(in, (int)y - i, (int)h, mode);
-            const float* r_down = v_row(in, (int)y + i, (int)h, mode);
-            float v_up   = r_up   ? r_up[x]   : 0.0f;
-            float v_down = r_down ? r_down[x] : 0.0f;
-            sum += kernel[r + i] * (v_up + v_down);
-          }
-          rowout[x] = sum;
+    for (intptr_t y = 0; y < min((intptr_t)r, h); ++y) {
+      float* JXL_RESTRICT rowout = out->Row(y);
+      for (intptr_t x = x0; x < x1; ++x) {
+        float sum = kernel[r] * in.Row(y)[x];
+        for (int i = 1; i <= r; ++i) {
+          const float* r_up   = v_row(in, (int)y - i, (int)h, mode);
+          const float* r_down = v_row(in, (int)y + i, (int)h, mode);
+          float v_up   = r_up   ? r_up[x]   : 0.0f;
+          float v_down = r_down ? r_down[x] : 0.0f;
+          sum += kernel[r + i] * (v_up + v_down);
         }
-      }
-    }
-    else {
-      for (intptr_t y = 0; y < min((intptr_t)r, h); ++y) {
-        float* JXL_RESTRICT rowout = out->Row(y);
-        for (intptr_t x = x0; x < x1; ++x) {
-          float sum = 0.0f;
-          for (int i = -r; i <= r; ++i) {
-            const float* row = v_row(in, (int)y + i, (int)h, mode);
-            float v = row ? row[x] : 0.0f;
-            sum += v * kernel[i + r];
-          }
-          rowout[x] = sum;
-        }
+        rowout[x] = sum;
       }
     }
 
     // Interior: no bounds checks.
-    if (symm) {
-      for (intptr_t y = r; y < h - r; ++y) {
-        float* JXL_RESTRICT rowout = out->Row(y);
-        const float* JXL_RESTRICT row_c = in.Row(y);
-        intptr_t x = x0;
+    for (intptr_t y = r; y < h - r; ++y) {
+      float* JXL_RESTRICT rowout = out->Row(y);
+      const float* JXL_RESTRICT row_c = in.Row(y);
+      intptr_t x = x0;
 #if IC_CPU_ARM64
-        if (var::ssimu2_blur_neon) {
-          // 8-wide. Strips start at multiples of kStripWidth=64, so 8-wide
-          // accesses stay 16-byte aligned. r=5 is asserted at function entry.
-          const float* JXL_RESTRICT r_m5 = in.Row(y - 5);
-          const float* JXL_RESTRICT r_m4 = in.Row(y - 4);
-          const float* JXL_RESTRICT r_m3 = in.Row(y - 3);
-          const float* JXL_RESTRICT r_m2 = in.Row(y - 2);
-          const float* JXL_RESTRICT r_m1 = in.Row(y - 1);
-          const float* JXL_RESTRICT r_p1 = in.Row(y + 1);
-          const float* JXL_RESTRICT r_p2 = in.Row(y + 2);
-          const float* JXL_RESTRICT r_p3 = in.Row(y + 3);
-          const float* JXL_RESTRICT r_p4 = in.Row(y + 4);
-          const float* JXL_RESTRICT r_p5 = in.Row(y + 5);
-          for (; x + 7 < x1; x += 8) {
-            float32x4_t sum0 = vmulq_n_f32(vld1q_f32(row_c + x),     k0);
-            float32x4_t sum1 = vmulq_n_f32(vld1q_f32(row_c + x + 4), k0);
-            #define IC_VTAP(UP, DN, K) do { \
-              float32x4_t u0 = vld1q_f32((UP) + x);     \
-              float32x4_t d0 = vld1q_f32((DN) + x);     \
-              float32x4_t u1 = vld1q_f32((UP) + x + 4); \
-              float32x4_t d1 = vld1q_f32((DN) + x + 4); \
-              sum0 = vfmaq_n_f32(sum0, vaddq_f32(u0, d0), (K)); \
-              sum1 = vfmaq_n_f32(sum1, vaddq_f32(u1, d1), (K)); \
-            } while (0)
-            IC_VTAP(r_m1, r_p1, k1);
-            IC_VTAP(r_m2, r_p2, k2);
-            IC_VTAP(r_m3, r_p3, k3);
-            IC_VTAP(r_m4, r_p4, k4);
-            IC_VTAP(r_m5, r_p5, k5);
-            #undef IC_VTAP
-            vst1q_f32(rowout + x,     sum0);
-            vst1q_f32(rowout + x + 4, sum1);
-          }
+      if (var::ssimu2_blur_neon) {
+        // 8-wide. Strips start at multiples of kStripWidth=64 so loads are
+        // 16-byte aligned. Row pointers hoisted once per y; the inner i loop
+        // unrolls with R constexpr.
+        const float* row_up[R];
+        const float* row_dn[R];
+        for (int i = 0; i < R; ++i) {
+          row_up[i] = in.Row(y - (i + 1));
+          row_dn[i] = in.Row(y + (i + 1));
         }
-#endif
-        for (; x < x1; ++x) {
-          float sum = kernel[r] * row_c[x];
-          for (int i = 1; i <= r; ++i) {
-            sum += kernel[r + i] * (in.Row(y + i)[x] + in.Row(y - i)[x]);
+        for (; x + 7 < x1; x += 8) {
+          float32x4_t sum0 = vmulq_n_f32(vld1q_f32(row_c + x),     kloc[0]);
+          float32x4_t sum1 = vmulq_n_f32(vld1q_f32(row_c + x + 4), kloc[0]);
+          for (int i = 0; i < R; ++i) {
+            float32x4_t u0 = vld1q_f32(row_up[i] + x);
+            float32x4_t d0 = vld1q_f32(row_dn[i] + x);
+            float32x4_t u1 = vld1q_f32(row_up[i] + x + 4);
+            float32x4_t d1 = vld1q_f32(row_dn[i] + x + 4);
+            sum0 = vfmaq_n_f32(sum0, vaddq_f32(u0, d0), kloc[i + 1]);
+            sum1 = vfmaq_n_f32(sum1, vaddq_f32(u1, d1), kloc[i + 1]);
           }
-          rowout[x] = sum;
+          vst1q_f32(rowout + x,     sum0);
+          vst1q_f32(rowout + x + 4, sum1);
         }
       }
-    }
-    else {
-      for (intptr_t y = r; y < h - r; ++y) {
-        float* JXL_RESTRICT rowout = out->Row(y);
-        for (intptr_t x = x0; x < x1; ++x) {
-          float sum = 0.0f;
-          for (int i = -r; i <= r; ++i) {
-            sum += in.Row(y + i)[x] * kernel[i + r];
-          }
-          rowout[x] = sum;
+#endif
+      for (; x < x1; ++x) {
+        float sum = kernel[r] * row_c[x];
+        for (int i = 1; i <= r; ++i) {
+          sum += kernel[r + i] * (in.Row(y + i)[x] + in.Row(y - i)[x]);
         }
+        rowout[x] = sum;
       }
     }
 
     // Bottom border.
-    if (symm) {
-      for (intptr_t y = max(h - r, (intptr_t)r); y < h; ++y) {
-        float* JXL_RESTRICT rowout = out->Row(y);
-        for (intptr_t x = x0; x < x1; ++x) {
-          float sum = kernel[r] * in.Row(y)[x];
-          for (int i = 1; i <= r; ++i) {
-            const float* r_up   = v_row(in, (int)y - i, (int)h, mode);
-            const float* r_down = v_row(in, (int)y + i, (int)h, mode);
-            float v_up   = r_up   ? r_up[x]   : 0.0f;
-            float v_down = r_down ? r_down[x] : 0.0f;
-            sum += kernel[r + i] * (v_up + v_down);
-          }
-          rowout[x] = sum;
+    for (intptr_t y = max(h - r, (intptr_t)r); y < h; ++y) {
+      float* JXL_RESTRICT rowout = out->Row(y);
+      for (intptr_t x = x0; x < x1; ++x) {
+        float sum = kernel[r] * in.Row(y)[x];
+        for (int i = 1; i <= r; ++i) {
+          const float* r_up   = v_row(in, (int)y - i, (int)h, mode);
+          const float* r_down = v_row(in, (int)y + i, (int)h, mode);
+          float v_up   = r_up   ? r_up[x]   : 0.0f;
+          float v_down = r_down ? r_down[x] : 0.0f;
+          sum += kernel[r + i] * (v_up + v_down);
         }
-      }
-    }
-    else {
-      for (intptr_t y = max(h - r, (intptr_t)r); y < h; ++y) {
-        float* JXL_RESTRICT rowout = out->Row(y);
-        for (intptr_t x = x0; x < x1; ++x) {
-          float sum = 0.0f;
-          for (int i = -r; i <= r; ++i) {
-            const float* row = v_row(in, (int)y + i, (int)h, mode);
-            float v = row ? row[x] : 0.0f;
-            sum += v * kernel[i + r];
-          }
-          rowout[x] = sum;
-        }
+        rowout[x] = sum;
       }
     }
   }
