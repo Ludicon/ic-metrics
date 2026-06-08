@@ -80,6 +80,13 @@ enum BlurWrapMode {
 };
 IC_VAR_INT(ssimu2_blur_wrap_mode, BlurWrapMode_ClampEdge);
 
+// Use the symmetric form of the FIR convolution in the interior loops:
+// sum = k[0]*src[x] + sum_{i=1..r} k[i] * (src[x+i] + src[x-i]).
+// Math-identical for a symmetric kernel; the open question is whether the
+// shape gives the compiler/CPU more ILP than the naive 11-FMA chain on a
+// uarch where FMA and ADD share throughput ports (e.g. Apple M-series).
+IC_VAR_BOOL(ssimu2_blur_symmetric_kernel, false);
+
 
 #define JXL_RESTRICT __restrict
 
@@ -490,12 +497,23 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
     }
 
     // Interior: no bounds checks needed.
-    for (intptr_t x = r; x < w - r; ++x) {
-      float sum = 0.0f;
-      for (int i = -r; i <= r; ++i) {
-        sum += rowp[x + i] * kernel[i + r];
+    if (var::ssimu2_blur_symmetric_kernel) {
+      for (intptr_t x = r; x < w - r; ++x) {
+        float sum = kernel[r] * rowp[x];
+        for (int i = 1; i <= r; ++i) {
+          sum += kernel[r + i] * (rowp[x + i] + rowp[x - i]);
+        }
+        rowout[x] = sum;
       }
-      rowout[x] = sum;
+    }
+    else {
+      for (intptr_t x = r; x < w - r; ++x) {
+        float sum = 0.0f;
+        for (int i = -r; i <= r; ++i) {
+          sum += rowp[x + i] * kernel[i + r];
+        }
+        rowout[x] = sum;
+      }
     }
 
     // Right border.
@@ -547,14 +565,29 @@ static void ConvolveVertical(const ImageF& in, ImageF* JXL_RESTRICT out, const f
     }
 
     // Interior: no bounds checks.
-    for (intptr_t y = r; y < h - r; ++y) {
-      float* JXL_RESTRICT rowout = out->Row(y);
-      for (intptr_t x = x0; x < x1; ++x) {
-        float sum = 0.0f;
-        for (int i = -r; i <= r; ++i) {
-          sum += in.Row(y + i)[x] * kernel[i + r];
+    if (var::ssimu2_blur_symmetric_kernel) {
+      for (intptr_t y = r; y < h - r; ++y) {
+        float* JXL_RESTRICT rowout = out->Row(y);
+        const float* JXL_RESTRICT row_c = in.Row(y);
+        for (intptr_t x = x0; x < x1; ++x) {
+          float sum = kernel[r] * row_c[x];
+          for (int i = 1; i <= r; ++i) {
+            sum += kernel[r + i] * (in.Row(y + i)[x] + in.Row(y - i)[x]);
+          }
+          rowout[x] = sum;
         }
-        rowout[x] = sum;
+      }
+    }
+    else {
+      for (intptr_t y = r; y < h - r; ++y) {
+        float* JXL_RESTRICT rowout = out->Row(y);
+        for (intptr_t x = x0; x < x1; ++x) {
+          float sum = 0.0f;
+          for (int i = -r; i <= r; ++i) {
+            sum += in.Row(y + i)[x] * kernel[i + r];
+          }
+          rowout[x] = sum;
+        }
       }
     }
 
