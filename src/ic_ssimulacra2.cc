@@ -73,6 +73,19 @@ IC_VAR_BOOL(ssimu2_fast_blur, true);
 
 namespace {
 
+// Internal aggregate; not part of the public API.
+struct MsssimScale {
+  double avg_ssim[3 * 2];
+  double avg_edgediff[3 * 4];
+};
+
+static const int kNumScales = 6;
+struct Msssim {
+  MsssimScale scales[kNumScales];
+
+  double Score() const;
+};
+
 template <typename T> inline constexpr T max(const T & a, const T & b) {
   return (b < a) ? a : b;
 }
@@ -1156,8 +1169,6 @@ static Msssim ComputeSSIMULACRA2(Image3F &orig, Image3F &dist, unsigned char* er
   return msssim;
 }
 
-} // namespace
-
 
 /*
 The final score is based on a weighted sum of 108 sub-scores:
@@ -1278,6 +1289,8 @@ Msssim ComputeSSIMULACRA2(int w, int h, const unsigned char* orig, const unsigne
 
   return ComputeSSIMULACRA2(orig_img, dist_img, error_map);
 }
+
+} // namespace
 
 
 double ComputeSSIMULACRA2Score(int w, int h, const unsigned char* orig, const unsigned char* dist, unsigned char* error_map) {
