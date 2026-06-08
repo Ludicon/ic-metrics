@@ -91,6 +91,11 @@ IC_VAR_INT(ssimu2_blur_wrap_mode, BlurWrapMode_ClampEdge);
     IC_VAR_BOOL(ssimu2_blur_neon, false);
 #endif
 
+// Route the NEON path through the f32x8 helper layer (load/store/add/mul/fma)
+// instead of raw intrinsics. Same code shape; designed to map 1:1 to AVX2
+// when we add an x86 backend.
+IC_VAR_BOOL(ssimu2_blur_simd_helpers, true);
+
 
 #define JXL_RESTRICT __restrict
 
@@ -481,6 +486,47 @@ static inline float sample_h(const float* JXL_RESTRICT row, int xi, int w, int m
   return row[clamp(xi, 0, w - 1)]; // ClampEdge
 }
 
+
+////////////////////////////////
+// Minimal 8-wide SIMD helpers. f32x8 = 2x NEON 128-bit registers on arm64,
+// will map to 1x AVX2 256-bit register on x86_64. Use these in inner loops
+// in place of raw intrinsics so the same code body works for both.
+//
+// Only the ops the blur needs today: load / store / add / mul-by-scalar /
+// fma(acc, vec, scalar). Add more as other kernels need them.
+
+#if IC_CPU_ARM64
+
+struct f32x8 {
+  float32x4_t lo;
+  float32x4_t hi;
+};
+
+IC_FORCEINLINE f32x8 load(const float* p) {
+  return { vld1q_f32(p), vld1q_f32(p + 4) };
+}
+
+IC_FORCEINLINE void store(float* p, f32x8 v) {
+  vst1q_f32(p,     v.lo);
+  vst1q_f32(p + 4, v.hi);
+}
+
+IC_FORCEINLINE f32x8 add(f32x8 a, f32x8 b) {
+  return { vaddq_f32(a.lo, b.lo), vaddq_f32(a.hi, b.hi) };
+}
+
+IC_FORCEINLINE f32x8 mul(f32x8 a, float s) {
+  return { vmulq_n_f32(a.lo, s), vmulq_n_f32(a.hi, s) };
+}
+
+// acc + vec * scalar
+IC_FORCEINLINE f32x8 fma(f32x8 acc, f32x8 v, float s) {
+  return { vfmaq_n_f32(acc.lo, v.lo, s), vfmaq_n_f32(acc.hi, v.hi, s) };
+}
+
+#endif // IC_CPU_ARM64
+
+
 static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const float* JXL_RESTRICT kernel, int r) {
   const intptr_t w = in.xsize();
   const intptr_t h = in.ysize();
@@ -515,21 +561,32 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
     // Interior: x ∈ [R, w-R), no bounds checks needed.
 #if IC_CPU_ARM64
     if (var::ssimu2_blur_neon) {
-      // 8-wide (2x NEON, maps to 1x AVX2 256-bit). Up to 7 leftover pixels
-      // fall through to the right-border loop (sample_h, ~0.15% overhead).
-      for (; x + 7 < w - R; x += 8) {
-        float32x4_t sum0 = vmulq_n_f32(vld1q_f32(rowp + x),     kloc[0]);
-        float32x4_t sum1 = vmulq_n_f32(vld1q_f32(rowp + x + 4), kloc[0]);
-        for (int i = 1; i <= R; ++i) {
-          float32x4_t l0 = vld1q_f32(rowp + x - i);
-          float32x4_t r0 = vld1q_f32(rowp + x + i);
-          float32x4_t l1 = vld1q_f32(rowp + x + 4 - i);
-          float32x4_t r1 = vld1q_f32(rowp + x + 4 + i);
-          sum0 = vfmaq_n_f32(sum0, vaddq_f32(l0, r0), kloc[i]);
-          sum1 = vfmaq_n_f32(sum1, vaddq_f32(l1, r1), kloc[i]);
+      if (var::ssimu2_blur_simd_helpers) {
+        // 8-wide via the f32x8 helper layer (portable to AVX2).
+        for (; x + 7 < w - R; x += 8) {
+          f32x8 sum = mul(load(rowp + x), kloc[0]);
+          for (int i = 1; i <= R; ++i) {
+            sum = fma(sum, add(load(rowp + x - i), load(rowp + x + i)), kloc[i]);
+          }
+          store(rowout + x, sum);
         }
-        vst1q_f32(rowout + x,     sum0);
-        vst1q_f32(rowout + x + 4, sum1);
+      }
+      else {
+        // Raw NEON intrinsics (kept for A/B comparison).
+        for (; x + 7 < w - R; x += 8) {
+          float32x4_t sum0 = vmulq_n_f32(vld1q_f32(rowp + x),     kloc[0]);
+          float32x4_t sum1 = vmulq_n_f32(vld1q_f32(rowp + x + 4), kloc[0]);
+          for (int i = 1; i <= R; ++i) {
+            float32x4_t l0 = vld1q_f32(rowp + x - i);
+            float32x4_t r0 = vld1q_f32(rowp + x + i);
+            float32x4_t l1 = vld1q_f32(rowp + x + 4 - i);
+            float32x4_t r1 = vld1q_f32(rowp + x + 4 + i);
+            sum0 = vfmaq_n_f32(sum0, vaddq_f32(l0, r0), kloc[i]);
+            sum1 = vfmaq_n_f32(sum1, vaddq_f32(l1, r1), kloc[i]);
+          }
+          vst1q_f32(rowout + x,     sum0);
+          vst1q_f32(rowout + x + 4, sum1);
+        }
       }
     }
     else
@@ -616,27 +673,37 @@ static void ConvolveVertical(const ImageF& in, ImageF* JXL_RESTRICT out, const f
       intptr_t x = x0;
 #if IC_CPU_ARM64
       if (var::ssimu2_blur_neon) {
-        // 8-wide. Strips start at multiples of kStripWidth=64 so loads are
-        // 16-byte aligned. Row pointers hoisted once per y.
+        // Row pointers hoisted once per y; inner i loop unrolls with R constexpr.
         const float* row_up[R];
         const float* row_dn[R];
         for (int i = 0; i < R; ++i) {
           row_up[i] = in.Row(y - (i + 1));
           row_dn[i] = in.Row(y + (i + 1));
         }
-        for (; x + 7 < x1; x += 8) {
-          float32x4_t sum0 = vmulq_n_f32(vld1q_f32(row_c + x),     kloc[0]);
-          float32x4_t sum1 = vmulq_n_f32(vld1q_f32(row_c + x + 4), kloc[0]);
-          for (int i = 0; i < R; ++i) {
-            float32x4_t u0 = vld1q_f32(row_up[i] + x);
-            float32x4_t d0 = vld1q_f32(row_dn[i] + x);
-            float32x4_t u1 = vld1q_f32(row_up[i] + x + 4);
-            float32x4_t d1 = vld1q_f32(row_dn[i] + x + 4);
-            sum0 = vfmaq_n_f32(sum0, vaddq_f32(u0, d0), kloc[i + 1]);
-            sum1 = vfmaq_n_f32(sum1, vaddq_f32(u1, d1), kloc[i + 1]);
+        if (var::ssimu2_blur_simd_helpers) {
+          for (; x + 7 < x1; x += 8) {
+            f32x8 sum = mul(load(row_c + x), kloc[0]);
+            for (int i = 0; i < R; ++i) {
+              sum = fma(sum, add(load(row_up[i] + x), load(row_dn[i] + x)), kloc[i + 1]);
+            }
+            store(rowout + x, sum);
           }
-          vst1q_f32(rowout + x,     sum0);
-          vst1q_f32(rowout + x + 4, sum1);
+        }
+        else {
+          for (; x + 7 < x1; x += 8) {
+            float32x4_t sum0 = vmulq_n_f32(vld1q_f32(row_c + x),     kloc[0]);
+            float32x4_t sum1 = vmulq_n_f32(vld1q_f32(row_c + x + 4), kloc[0]);
+            for (int i = 0; i < R; ++i) {
+              float32x4_t u0 = vld1q_f32(row_up[i] + x);
+              float32x4_t d0 = vld1q_f32(row_dn[i] + x);
+              float32x4_t u1 = vld1q_f32(row_up[i] + x + 4);
+              float32x4_t d1 = vld1q_f32(row_dn[i] + x + 4);
+              sum0 = vfmaq_n_f32(sum0, vaddq_f32(u0, d0), kloc[i + 1]);
+              sum1 = vfmaq_n_f32(sum1, vaddq_f32(u1, d1), kloc[i + 1]);
+            }
+            vst1q_f32(rowout + x,     sum0);
+            vst1q_f32(rowout + x + 4, sum1);
+          }
         }
       }
 #endif
