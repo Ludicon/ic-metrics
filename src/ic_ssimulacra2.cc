@@ -803,12 +803,11 @@ struct Blur {
     ConvolveVertical(temp, out, kernel);
   }
 
-  Image3F operator()(const Image3F& in) {
-    Image3F out(in.xsize(), in.ysize());
-    operator()(in.Plane(0), &out.Plane(0));
-    operator()(in.Plane(1), &out.Plane(1));
-    operator()(in.Plane(2), &out.Plane(2));
-    return out;
+  // Caller pre-allocates `out` at the desired size; we don't allocate here.
+  void operator()(const Image3F& in, Image3F* out) {
+    operator()(in.Plane(0), &out->Plane(0));
+    operator()(in.Plane(1), &out->Plane(1));
+    operator()(in.Plane(2), &out->Plane(2));
   }
 
   void ShrinkTo(const size_t xsize, const size_t ysize) {
@@ -1045,6 +1044,15 @@ static Msssim ComputeSSIMULACRA2(Image3F &orig, Image3F &dist, unsigned char* er
   Image3F mul(img1.xsize(), img1.ysize());
   Blur blur(img1.xsize(), img1.ysize());
 
+  // Per-scale blur outputs, pre-allocated at scale-0 size and reused via
+  // ShrinkTo each scale. Eliminates ~30 Image3F allocs / 90 ImageF mallocs
+  // per call (the dominant allocation source in the profile).
+  Image3F sigma1_sq(w, h);
+  Image3F sigma2_sq(w, h);
+  Image3F sigma12  (w, h);
+  Image3F mu1      (w, h);
+  Image3F mu2      (w, h);
+
   for (int scale = 0; scale < kNumScales; scale++) {
     if (img1.xsize() < 8 || img1.ysize() < 8) {
       break;
@@ -1061,20 +1069,21 @@ static Msssim ComputeSSIMULACRA2(Image3F &orig, Image3F &dist, unsigned char* er
       error_scale.ShrinkTo(orig.xsize(), orig.ysize());
       error_scale.Clear();
     }
-    mul.ShrinkTo(img1.xsize(), img1.ysize());
-    blur.ShrinkTo(img1.xsize(), img1.ysize());
+    const size_t sx = img1.xsize();
+    const size_t sy = img1.ysize();
+    mul      .ShrinkTo(sx, sy);
+    blur     .ShrinkTo(sx, sy);
+    sigma1_sq.ShrinkTo(sx, sy);
+    sigma2_sq.ShrinkTo(sx, sy);
+    sigma12  .ShrinkTo(sx, sy);
+    mu1      .ShrinkTo(sx, sy);
+    mu2      .ShrinkTo(sx, sy);
 
-    Multiply(img1, img1, &mul);
-    Image3F sigma1_sq = blur(mul);  // blur(img1 * img1)
-
-    Multiply(img2, img2, &mul);
-    Image3F sigma2_sq = blur(mul);  // blur(img2 * img2)
-
-    Multiply(img1, img2, &mul);
-    Image3F sigma12 = blur(mul);    // blur(img1 * img2)
-
-    Image3F mu1 = blur(img1);       // blur(img1)
-    Image3F mu2 = blur(img2);       // blur(img2)
+    Multiply(img1, img1, &mul);  blur(mul,  &sigma1_sq);
+    Multiply(img2, img2, &mul);  blur(mul,  &sigma2_sq);
+    Multiply(img1, img2, &mul);  blur(mul,  &sigma12);
+    blur(img1, &mu1);
+    blur(img2, &mu2);
 
     SSIMMap(mu1, mu2, sigma1_sq, sigma2_sq, sigma12, msssim.scales[scale].avg_ssim, error_scale, scale);
     EdgeDiffMap(img1, mu1, img2, mu2, msssim.scales[scale].avg_edgediff, error_scale, scale);
