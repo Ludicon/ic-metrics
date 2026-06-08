@@ -499,10 +499,12 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
   for (intptr_t y = 0; y < h; ++y) {
     const float* JXL_RESTRICT rowp = in.Row(y);
     float* JXL_RESTRICT rowout = out->Row(y);
+    intptr_t x = 0;
 
-    // Left border.
+    // Left border: [0, min(r, w)).
+    const intptr_t x_left_end = min((intptr_t)r, w);
     if (symm) {
-      for (intptr_t x = 0; x < min((intptr_t)r, w); ++x) {
+      for (; x < x_left_end; ++x) {
         float sum = kernel[r] * sample_h(rowp, (int)x, (int)w, mode);
         for (int i = 1; i <= r; ++i) {
           const float l = sample_h(rowp, (int)x - i, (int)w, mode);
@@ -513,7 +515,7 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
       }
     }
     else {
-      for (intptr_t x = 0; x < min((intptr_t)r, w); ++x) {
+      for (; x < x_left_end; ++x) {
         float sum = 0.0f;
         for (int i = -r; i <= r; ++i) {
           sum += sample_h(rowp, (int)x + i, (int)w, mode) * kernel[i + r];
@@ -522,23 +524,30 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
       }
     }
 
-    // Interior: no bounds checks needed.
-    if (symm) {
-      intptr_t x = r;
+    // Interior: x ∈ [r, w-r), no bounds checks needed.
 #if IC_CPU_ARM64
-      if (var::ssimu2_blur_neon) {
-        // 4-wide NEON: 4 output pixels per iteration.
-        for (; x + 3 < w - r; x += 4) {
-          float32x4_t sum = vmulq_n_f32(vld1q_f32(rowp + x), kernel[r]);
-          for (int i = 1; i <= r; ++i) {
-            float32x4_t l  = vld1q_f32(rowp + x - i);
-            float32x4_t rt = vld1q_f32(rowp + x + i);
-            sum = vfmaq_n_f32(sum, vaddq_f32(l, rt), kernel[r + i]);
-          }
-          vst1q_f32(rowout + x, sum);
+    if (symm && var::ssimu2_blur_neon) {
+      // 8-wide (2x NEON, maps to 1x AVX2 256-bit). Up to 7 leftover pixels
+      // fall through to the right-border loop, which handles them with
+      // sample_h at negligible cost (<0.15% of total).
+      for (; x + 7 < w - r; x += 8) {
+        float32x4_t sum0 = vmulq_n_f32(vld1q_f32(rowp + x),     kernel[r]);
+        float32x4_t sum1 = vmulq_n_f32(vld1q_f32(rowp + x + 4), kernel[r]);
+        for (int i = 1; i <= r; ++i) {
+          float32x4_t l0 = vld1q_f32(rowp + x - i);
+          float32x4_t r0 = vld1q_f32(rowp + x + i);
+          float32x4_t l1 = vld1q_f32(rowp + x + 4 - i);
+          float32x4_t r1 = vld1q_f32(rowp + x + 4 + i);
+          sum0 = vfmaq_n_f32(sum0, vaddq_f32(l0, r0), kernel[r + i]);
+          sum1 = vfmaq_n_f32(sum1, vaddq_f32(l1, r1), kernel[r + i]);
         }
+        vst1q_f32(rowout + x,     sum0);
+        vst1q_f32(rowout + x + 4, sum1);
       }
+    }
+    else
 #endif
+    if (symm) {
       for (; x < w - r; ++x) {
         float sum = kernel[r] * rowp[x];
         for (int i = 1; i <= r; ++i) {
@@ -548,7 +557,7 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
       }
     }
     else {
-      for (intptr_t x = r; x < w - r; ++x) {
+      for (; x < w - r; ++x) {
         float sum = 0.0f;
         for (int i = -r; i <= r; ++i) {
           sum += rowp[x + i] * kernel[i + r];
@@ -557,9 +566,9 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
       }
     }
 
-    // Right border.
+    // Right border: from wherever we stopped to w.
     if (symm) {
-      for (intptr_t x = max(w - r, (intptr_t)r); x < w; ++x) {
+      for (; x < w; ++x) {
         float sum = kernel[r] * sample_h(rowp, (int)x, (int)w, mode);
         for (int i = 1; i <= r; ++i) {
           const float l = sample_h(rowp, (int)x - i, (int)w, mode);
@@ -570,7 +579,7 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
       }
     }
     else {
-      for (intptr_t x = max(w - r, (intptr_t)r); x < w; ++x) {
+      for (; x < w; ++x) {
         float sum = 0.0f;
         for (int i = -r; i <= r; ++i) {
           sum += sample_h(rowp, (int)x + i, (int)w, mode) * kernel[i + r];
@@ -652,17 +661,27 @@ static void ConvolveVertical(const ImageF& in, ImageF* JXL_RESTRICT out, const f
         intptr_t x = x0;
 #if IC_CPU_ARM64
         if (var::ssimu2_blur_neon) {
-          // 4-wide NEON. All row reads are aligned to 4-element boundaries
-          // because the strip starts at x0 (multiple of kStripWidth=64).
-          for (; x + 3 < x1; x += 4) {
-            float32x4_t sum = vmulq_n_f32(vld1q_f32(row_c + x), kernel[r]);
+          // 8-wide. Strips start at multiples of kStripWidth=64, so 8-wide
+          // accesses stay 16-byte aligned.
+          for (; x + 7 < x1; x += 8) {
+            float32x4_t sum0 = vmulq_n_f32(vld1q_f32(row_c + x),     kernel[r]);
+            float32x4_t sum1 = vmulq_n_f32(vld1q_f32(row_c + x + 4), kernel[r]);
             for (int i = 1; i <= r; ++i) {
-              float32x4_t up   = vld1q_f32(in.Row(y - i) + x);
-              float32x4_t down = vld1q_f32(in.Row(y + i) + x);
-              sum = vfmaq_n_f32(sum, vaddq_f32(up, down), kernel[r + i]);
+              const float* row_up   = in.Row(y - i);
+              const float* row_down = in.Row(y + i);
+              float32x4_t u0 = vld1q_f32(row_up   + x);
+              float32x4_t d0 = vld1q_f32(row_down + x);
+              float32x4_t u1 = vld1q_f32(row_up   + x + 4);
+              float32x4_t d1 = vld1q_f32(row_down + x + 4);
+              sum0 = vfmaq_n_f32(sum0, vaddq_f32(u0, d0), kernel[r + i]);
+              sum1 = vfmaq_n_f32(sum1, vaddq_f32(u1, d1), kernel[r + i]);
             }
-            vst1q_f32(rowout + x, sum);
+            vst1q_f32(rowout + x,     sum0);
+            vst1q_f32(rowout + x + 4, sum1);
           }
+          // Strip widths are multiples of 8 (kStripWidth=64) in the typical
+          // case, so the 8-wide loop usually consumes the whole strip; the
+          // scalar tail below catches any partial last strip.
         }
 #endif
         for (; x < x1; ++x) {
