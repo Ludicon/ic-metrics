@@ -17,7 +17,10 @@
 #include "harness.h"
 #include "ic_shared.h"
 #include "ic_ssimulacra2.h"
+#include "ic_vars.h"
 #include "impls.h"
+
+IC_VAR_DECL(bool, ssimu2_blur_clamp_to_border);
 
 #include <algorithm>
 #include <chrono>
@@ -172,6 +175,19 @@ int main(int argc, char** argv) {
         }
         else if (strcmp(argv[i], "--impl") == 0 && i + 1 < argc) {
             g_impl_filter = argv[++i];
+        }
+        else if (strcmp(argv[i], "--wrap") == 0 && i + 1 < argc) {
+            const char* w = argv[++i];
+            if (strcmp(w, "edge") == 0) {
+                var::ssimu2_blur_clamp_to_border = false;
+            }
+            else if (strcmp(w, "border") == 0) {
+                var::ssimu2_blur_clamp_to_border = true;
+            }
+            else {
+                fprintf(stderr, "bench: --wrap must be edge|border (got %s)\n", w);
+                return 1;
+            }
         }
         else if (argv[i][0] == '-') {
             fprintf(stderr, "bench: unknown flag %s\n", argv[i]);

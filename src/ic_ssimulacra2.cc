@@ -64,6 +64,11 @@ Design:
 #endif
 
 IC_VAR_BOOL(ssimu2_alpha_blend, false);
+// false: clamp-to-edge (off-image = nearest edge pixel). Default; matches our
+//        prior behavior and gives more physically meaningful scores on textures.
+// true : clamp-to-border (off-image = 0). Matches cloudinary / rust-av;
+//        useful for cross-impl score validation.
+IC_VAR_BOOL(ssimu2_blur_clamp_to_border, false);
 
 
 #define JXL_RESTRICT __restrict
@@ -446,16 +451,26 @@ inline void GaussianKernel(int radius, float sigma, float kernel[11]) {
 static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const float* JXL_RESTRICT kernel, int r) {
   const intptr_t w = in.xsize();
   const intptr_t h = in.ysize();
+  const bool to_border = var::ssimu2_blur_clamp_to_border;
 
   for (intptr_t y = 0; y < h; ++y) {
     const float* JXL_RESTRICT rowp = in.Row(y);
     float* JXL_RESTRICT rowout = out->Row(y);
 
-    // Left border: clamp on the left side.
+    // Left border.
     for (intptr_t x = 0; x < min((intptr_t)r, w); ++x) {
       float sum = 0.0f;
-      for (int i = -r; i <= r; ++i) {
-        sum += rowp[clamp((int)x + i, 0, (int)w - 1)] * kernel[i + r];
+      if (to_border) {
+        for (int i = -r; i <= r; ++i) {
+          const int xi = (int)x + i;
+          const float v = (xi >= 0 && xi < (int)w) ? rowp[xi] : 0.0f;
+          sum += v * kernel[i + r];
+        }
+      }
+      else {
+        for (int i = -r; i <= r; ++i) {
+          sum += rowp[clamp((int)x + i, 0, (int)w - 1)] * kernel[i + r];
+        }
       }
       rowout[x] = sum;
     }
@@ -469,11 +484,20 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
       rowout[x] = sum;
     }
 
-    // Right border: clamp on the right side.
+    // Right border.
     for (intptr_t x = max(w - r, (intptr_t)r); x < w; ++x) {
       float sum = 0.0f;
-      for (int i = -r; i <= r; ++i) {
-        sum += rowp[clamp((int)x + i, 0, (int)w - 1)] * kernel[i + r];
+      if (to_border) {
+        for (int i = -r; i <= r; ++i) {
+          const int xi = (int)x + i;
+          const float v = (xi >= 0 && xi < (int)w) ? rowp[xi] : 0.0f;
+          sum += v * kernel[i + r];
+        }
+      }
+      else {
+        for (int i = -r; i <= r; ++i) {
+          sum += rowp[clamp((int)x + i, 0, (int)w - 1)] * kernel[i + r];
+        }
       }
       rowout[x] = sum;
     }
@@ -483,6 +507,7 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
 static void ConvolveVertical(const ImageF& in, ImageF* JXL_RESTRICT out, const float* JXL_RESTRICT kernel, int r) {
   const intptr_t w = in.xsize();
   const intptr_t h = in.ysize();
+  const bool to_border = var::ssimu2_blur_clamp_to_border;
 
   // Process in vertical strips for cache locality.
   const intptr_t kStripWidth = 64;
@@ -495,8 +520,17 @@ static void ConvolveVertical(const ImageF& in, ImageF* JXL_RESTRICT out, const f
       float* JXL_RESTRICT rowout = out->Row(y);
       for (intptr_t x = x0; x < x1; ++x) {
         float sum = 0.0f;
-        for (int i = -r; i <= r; ++i) {
-          sum += in.Row(clamp((int)y + i, 0, (int)h - 1))[x] * kernel[i + r];
+        if (to_border) {
+          for (int i = -r; i <= r; ++i) {
+            const int yi = (int)y + i;
+            const float v = (yi >= 0 && yi < (int)h) ? in.Row(yi)[x] : 0.0f;
+            sum += v * kernel[i + r];
+          }
+        }
+        else {
+          for (int i = -r; i <= r; ++i) {
+            sum += in.Row(clamp((int)y + i, 0, (int)h - 1))[x] * kernel[i + r];
+          }
         }
         rowout[x] = sum;
       }
@@ -519,8 +553,17 @@ static void ConvolveVertical(const ImageF& in, ImageF* JXL_RESTRICT out, const f
       float* JXL_RESTRICT rowout = out->Row(y);
       for (intptr_t x = x0; x < x1; ++x) {
         float sum = 0.0f;
-        for (int i = -r; i <= r; ++i) {
-          sum += in.Row(clamp((int)y + i, 0, (int)h - 1))[x] * kernel[i + r];
+        if (to_border) {
+          for (int i = -r; i <= r; ++i) {
+            const int yi = (int)y + i;
+            const float v = (yi >= 0 && yi < (int)h) ? in.Row(yi)[x] : 0.0f;
+            sum += v * kernel[i + r];
+          }
+        }
+        else {
+          for (int i = -r; i <= r; ++i) {
+            sum += in.Row(clamp((int)y + i, 0, (int)h - 1))[x] * kernel[i + r];
+          }
         }
         rowout[x] = sum;
       }
