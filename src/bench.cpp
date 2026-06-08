@@ -21,8 +21,7 @@
 #include "impls.h"
 
 IC_VAR_DECL(int, ssimu2_blur_wrap_mode);
-IC_VAR_DECL(bool, ssimu2_blur_neon);
-IC_VAR_DECL(bool, ssimu2_blur_simd_helpers);
+IC_VAR_DECL(bool, ssimu2_blur_simd);
 // Must match BlurWrapMode in ic_ssimulacra2.cc.
 enum { WrapEdge = 0, WrapBorder = 1, WrapMirror = 2 };
 
@@ -180,11 +179,8 @@ int main(int argc, char** argv) {
         else if (strcmp(argv[i], "--impl") == 0 && i + 1 < argc) {
             g_impl_filter = argv[++i];
         }
-        else if (strcmp(argv[i], "--no-neon") == 0) {
-            var::ssimu2_blur_neon = false;
-        }
-        else if (strcmp(argv[i], "--no-simd-helpers") == 0) {
-            var::ssimu2_blur_simd_helpers = false;
+        else if (strcmp(argv[i], "--no-simd") == 0) {
+            var::ssimu2_blur_simd = false;
         }
         else if (strcmp(argv[i], "--wrap") == 0 && i + 1 < argc) {
             const char* w = argv[++i];
