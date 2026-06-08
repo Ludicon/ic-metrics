@@ -121,6 +121,23 @@ Typical section order in .cpp: includes, static helpers, public API.
 - Use `#if IC_CPU_X86`, `#if IC_CPU_ARM`, `#if IC_CPU_ARM64` for architecture-specific code.
 - Keep platform-specific code behind these guards, never raw `_WIN32` or `__APPLE__` in new code.
 
+## Flags
+
+When making changes to the core implementation of ic-metrics, protect the code changes using variable flags. You can use ic_vars for this:
+
+```
+IC_VAR_BOOL(new_implementation, true)
+
+if (var::new_implementation) {
+    // new implementation goes here
+}
+else {
+    // old implementation goes here
+}
+```
+
+This allows us testing both variants and ensure there are no regressions.
+
 # Code Navigation
 
 When tracing where a symbol is defined or finding all references to it, use LSP (goToDefinition, findReferences, hover) instead of Grep. LSP gives exact results; Grep gives text matches.
