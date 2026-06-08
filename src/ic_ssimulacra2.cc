@@ -659,11 +659,13 @@ static void ConvolveVertical(const ImageF& in, ImageF* JXL_RESTRICT out, const f
   float kloc[R + 1];
   for (int i = 0; i <= R; ++i) kloc[i] = kernel[R + i];
 
-  // Process in vertical strips for cache locality.
-  const intptr_t kStripWidth = 64;
-
-  for (intptr_t x0 = 0; x0 < w; x0 += kStripWidth) {
-    const intptr_t x1 = min(x0 + kStripWidth, w);
+  // Strip width was tuned via sweep: 8..1024 + no-striping all measured;
+  // no-striping wins at 1K images. Working set 9 × w × 4 bytes fits in L1
+  // up to w ≈ 1800; if you ever bench on much larger images and L1 pressure
+  // shows up, revisit and reintroduce a strip loop.
+  {
+    const intptr_t x0 = 0;
+    const intptr_t x1 = w;
 
     // Top border.
     for (intptr_t y = 0; y < min((intptr_t)R, h); ++y) {
