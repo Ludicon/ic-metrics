@@ -39,7 +39,9 @@ enum { WrapEdge = 0, WrapBorder = 1, WrapMirror = 2 };
 typedef double (*ScoreFn)(int w, int h, const u8* orig, const u8* dist);
 
 static double ours_compute_score(int w, int h, const u8* orig, const u8* dist) {
-    return ComputeSSIMULACRA2Score(w, h, orig, dist);
+    void* scratch = malloc(ic_ssimulacra2_score_scratch_size(w, h));
+    defer { free(scratch); };
+    return ic_ssimulacra2_score(w, h, orig, dist, scratch);
 }
 
 struct Impl {

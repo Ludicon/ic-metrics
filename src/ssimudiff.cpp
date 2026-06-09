@@ -60,7 +60,14 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    double score = ComputeSSIMULACRA2Score(w, h, orig, dist, error_map);
+    void* scratch = malloc(ic_ssimulacra2_score_scratch_size(w, h));
+    defer { free(scratch); };
+    if (!scratch) {
+        fprintf(stderr, "Failed to allocate scratch buffer\n");
+        return 1;
+    }
+
+    double score = ic_ssimulacra2_score(w, h, orig, dist, scratch, error_map);
     printf("SSIMULACRA2 score: %f\n", score);
 
     if (!stbi_write_png(error_filename, w, h, 4, error_map, w * 4)) {

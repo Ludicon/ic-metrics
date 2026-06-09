@@ -145,31 +145,24 @@ template <typename T> inline constexpr T lerp(T a, T b, T t) {
 }
 
 
+struct ScratchBuffer {
+  void* data;
+  usize size;
+  usize offset;
+  void* allocate(usize byte_count) {
+      ic_assert(offset + byte_count <= size);
+      void* ptr = (char*)data + offset;
+      offset += byte_count;
+      return ptr;
+  }
+};
+
+// Non-owning view: data lives in the caller-provided scratch buffer. Trivial
+// copy/move are correct semantics — they just copy the fat pointer.
 struct ImageF {
-  ImageF() {}
-  ImageF(size_t xs, size_t ys) : xs(xs), ys(ys), orig_xs(xs), orig_ys(ys) {
-    data = (float*)malloc(xs * ys * sizeof(float));
-  }
-  ImageF(ImageF&& other) noexcept : xs(other.xs), ys(other.ys), orig_xs(other.orig_xs), orig_ys(other.orig_ys), data(other.data) {
-    other.data = nullptr; // avoid double delete
-    other.xs = other.ys = other.orig_xs = other.orig_ys = 0;
-  }
-  ~ImageF() {
-    free(data);
-  }
-  void operator=(ImageF&& other) noexcept {
-      if (this != &other) {
-          delete[] data; // free old data if any
-
-          xs = other.xs;
-          ys = other.ys;
-          orig_xs = other.orig_xs;
-          orig_ys = other.orig_ys;
-          data = other.data;
-
-          other.data = nullptr;
-          other.xs = other.ys = other.orig_xs = other.orig_ys = 0;
-      }
+  ImageF() = default;
+  ImageF(size_t xs, size_t ys, ScratchBuffer& scratch) : xs(xs), ys(ys), orig_xs(xs), orig_ys(ys) {
+    data = (float*)scratch.allocate(xs * ys * sizeof(float));
   }
 
   void ShrinkTo(size_t xsize, size_t ysize) {
@@ -221,18 +214,12 @@ struct ImageF {
   float* data = nullptr;
 };
 
+// Non-owning view of three ImageF planes, all sharing the same ScratchBuffer.
 struct Image3F {
-  Image3F(size_t xs, size_t ys) {
+  Image3F() = default;
+  Image3F(size_t xs, size_t ys, ScratchBuffer& scratch) {
     for (int i = 0; i < 3; i++)
-      planes[i] = ImageF(xs, ys);
-  }
-  Image3F(Image3F&& other) noexcept {
-    for (int i = 0; i < 3; i++)
-      planes[i] = static_cast<ImageF&&>(other.planes[i]);
-  }
-  void operator=(Image3F&& other) noexcept {
-    for (int i = 0; i < 3; i++)
-      planes[i] = static_cast<ImageF&&>(other.planes[i]);
+      planes[i] = ImageF(xs, ys, scratch);
   }
 
   ImageF& Plane(size_t p) { return planes[p]; }
@@ -280,23 +267,6 @@ static const float kOpsinAbsorbanceMatrix[9] = {
 
 static const float kOpsinAbsorbanceBias = 0.0037930732552754493f;
 
-inline void OpsinAbsorbance(const float r, const float g, const float b,
-                            const float* JXL_RESTRICT premul_absorb,
-                            float* JXL_RESTRICT mixed0, float* JXL_RESTRICT mixed1, float* JXL_RESTRICT mixed2)
-{
-  const auto m0 = premul_absorb[0];
-  const auto m1 = premul_absorb[1];
-  const auto m2 = premul_absorb[2];
-  const auto m3 = premul_absorb[3];
-  const auto m4 = premul_absorb[4];
-  const auto m5 = premul_absorb[5];
-  const auto m6 = premul_absorb[6];
-  const auto m7 = premul_absorb[7];
-  const auto m8 = premul_absorb[8];
-  *mixed0 = m0 * r + m1 * g + m2 * b + kOpsinAbsorbanceBias;
-  *mixed1 = m3 * r + m4 * g + m5 * b + kOpsinAbsorbanceBias;
-  *mixed2 = m6 * r + m7 * g + m8 * b + kOpsinAbsorbanceBias;
-}
 inline float ZeroIfNegative(float x) {
   return x < 0.0f ? 0.0f : x;
 }
@@ -347,55 +317,6 @@ inline float CubeRootAndAdd(float x, float add) {
   return r;
 }
 
-inline void StoreXYB(float r, float g, float b,
-                     float* JXL_RESTRICT valx, float* JXL_RESTRICT valy, float* JXL_RESTRICT valz) {
-  *valx = (r - g) * 0.5f;
-  *valy = (r + g) * 0.5f;
-  *valz = b;
-}
-
-static void LinearRGBToXYB(float r, float g, float b, const float* JXL_RESTRICT premul_absorb,
-                           float* JXL_RESTRICT valx, float* JXL_RESTRICT valy, float* JXL_RESTRICT valz)
-{
-  float mixed0, mixed1, mixed2;
-  OpsinAbsorbance(r, g, b, premul_absorb, &mixed0, &mixed1, &mixed2);
-
-  // mixed* should be non-negative even for wide-gamut, so clamp to zero.
-  mixed0 = ZeroIfNegative(mixed0);
-  mixed1 = ZeroIfNegative(mixed1);
-  mixed2 = ZeroIfNegative(mixed2);
-
-  mixed0 = CubeRootAndAdd(mixed0, premul_absorb[9]);
-  mixed1 = CubeRootAndAdd(mixed1, premul_absorb[10]);
-  mixed2 = CubeRootAndAdd(mixed2, premul_absorb[11]);
-  StoreXYB(mixed0, mixed1, mixed2, valx, valy, valz);
-}
-
-static void LinearRGBToXYB(const Image3F& linear,
-                           const float* JXL_RESTRICT premul_absorb,
-                           Image3F* JXL_RESTRICT xyb)
-{
-  const size_t xsize = linear.xsize();
-  const size_t ysize = linear.ysize();
-
-  for (size_t y = 0; y < ysize; y ++) {
-    const float* JXL_RESTRICT row_in0 = linear.ConstPlaneRow(0, y);
-    const float* JXL_RESTRICT row_in1 = linear.ConstPlaneRow(1, y);
-    const float* JXL_RESTRICT row_in2 = linear.ConstPlaneRow(2, y);
-    float* JXL_RESTRICT row_xyb0 = xyb->PlaneRow(0, y);
-    float* JXL_RESTRICT row_xyb1 = xyb->PlaneRow(1, y);
-    float* JXL_RESTRICT row_xyb2 = xyb->PlaneRow(2, y);
-
-    for (size_t x = 0; x < xsize; x ++) {
-      const auto in_r = row_in0[x];
-      const auto in_g = row_in1[x];
-      const auto in_b = row_in2[x];
-
-      LinearRGBToXYB(in_r, in_g, in_b, premul_absorb, row_xyb0 + x, row_xyb1 + x, row_xyb2 + x);
-    }
-  }
-}
-
 // Approximates smooth functions via rational polynomials (i.e. dividing two
 // polynomials). Evaluates polynomials via Horner's scheme, which is faster than
 // Clenshaw recurrence for Chebyshev polynomials. LoadDup128 allows us to
@@ -440,30 +361,83 @@ static float LinearFromSRGB(float x) {
     return magnitude;
 }
 
-static void ToXYB(const Image3F& src, Image3F* dst) {
+static void ToXYB(Image3F& img) {
   JXL_PROFILE_FUNC
-  JXL_CHECK(SameSize(src, *dst));
 
   // Pre-broadcasted constants
-  float premul_absorb[12];
+  float M[12];
   for (size_t i = 0; i < 9; ++i) {
     //const auto absorb = kOpsinAbsorbanceMatrix[i] * (in.metadata()->IntensityTarget() / 255.0f);
     const float absorb = kOpsinAbsorbanceMatrix[i];
-    premul_absorb[i] = absorb;
+    M[i] = absorb;
   }
   const float neg_bias_cbrt = -cbrtf(kOpsinAbsorbanceBias);
   for (size_t i = 0; i < 3; ++i) {
-    premul_absorb[9 + i] = neg_bias_cbrt;
+    M[9 + i] = neg_bias_cbrt;
   }
 
-  LinearRGBToXYB(src, premul_absorb, dst);
+  const size_t xsize = img.xsize();
+  const size_t ysize = img.ysize();
+
+  for (size_t y = 0; y < ysize; y ++) {
+    float* JXL_RESTRICT row0 = img.PlaneRow(0, y);
+    float* JXL_RESTRICT row1 = img.PlaneRow(1, y);
+    float* JXL_RESTRICT row2 = img.PlaneRow(2, y);
+
+    for (size_t x = 0; x < xsize; x ++) {
+      // Read all three inputs first. After this, the per-pixel kernel only
+      // touches `r`, `g`, `b` locals, so writes to row_xyb*[x] below can't
+      // disturb the data we still need.
+      const float r = row0[x];
+      const float g = row1[x];
+      const float b = row2[x];
+
+      // OpsinAbsorbance (inlined).
+      float mixed0 = M[0] * r + M[1] * g + M[2] * b + kOpsinAbsorbanceBias;
+      float mixed1 = M[3] * r + M[4] * g + M[5] * b + kOpsinAbsorbanceBias;
+      float mixed2 = M[6] * r + M[7] * g + M[8] * b + kOpsinAbsorbanceBias;
+
+      mixed0 = ZeroIfNegative(mixed0);
+      mixed1 = ZeroIfNegative(mixed1);
+      mixed2 = ZeroIfNegative(mixed2);
+
+      mixed0 = CubeRootAndAdd(mixed0, M[9]);
+      mixed1 = CubeRootAndAdd(mixed1, M[10]);
+      mixed2 = CubeRootAndAdd(mixed2, M[11]);
+
+      // StoreXYB (inlined): X = (R-G)/2, Y = (R+G)/2, B' = B.
+      float X = (mixed0 - mixed1) * 0.5f;
+      float Y = (mixed0 + mixed1) * 0.5f;
+      float B = mixed2;
+
+      // MakePositiveXYB
+      /* Get all components in more or less 0..1 range
+         Range of Rec2020 with these adjustments:
+          X: 0.017223..0.998838
+          Y: 0.010000..0.855303
+          B: 0.048759..0.989551
+         Range of sRGB:
+          X: 0.204594..0.813402
+          Y: 0.010000..0.855308
+          B: 0.272295..0.938012
+         The maximum pixel-wise difference has to be <= 1 for the ssim formula to make
+         sense.
+      */
+      B = B - Y + 0.55f;
+      X = X * 14.f + 0.42f;
+      Y += 0.01f;
+
+      row0[x] = X;
+      row1[x] = Y;
+      row2[x] = B;
+    }
+  }
+
 }
 
 
 
-// Blur kernel parameters. radius is the only "knob" — fssimu2 uses 4,
-// cloudinary's recursive Gaussian effectively covers ~6 sigma. We default
-// to 5 (≈3·sigma cutoff); k[5]/k[0] ≈ 0.4%, contribution is negligible.
+// Blur kernel parameters.
 static constexpr float kBlurSigma  = 1.5f;
 static constexpr int   kBlurRadius = 4;
 static constexpr int   kBlurSize   = 2 * kBlurRadius + 1;
@@ -743,15 +717,19 @@ static void ConvolveVertical(const ImageF& in, ImageF* JXL_RESTRICT out, const f
   }
 }
 
-static Image3F Downsample(const Image3F &in, size_t fx, size_t fy) {
+// Caller pre-allocates `*out` at the desired downsampled size; we don't
+// allocate here. Safe in-place when in and out share the same backing
+// buffer (writes lag reads in row-major order).
+static void Downsample(const Image3F &in, size_t fx, size_t fy, Image3F* out) {
   JXL_PROFILE_FUNC
-  const size_t out_xsize = (in.xsize() + fx - 1) / fx;
-  const size_t out_ysize = (in.ysize() + fy - 1) / fy;
-  Image3F out(out_xsize, out_ysize);
+  const size_t out_xsize = out->xsize();
+  const size_t out_ysize = out->ysize();
+  JXL_CHECK(out_xsize == (in.xsize() + fx - 1) / fx);
+  JXL_CHECK(out_ysize == (in.ysize() + fy - 1) / fy);
   const float normalize = 1.0f / (fx * fy);
   for (size_t c = 0; c < 3; ++c) {
     for (size_t oy = 0; oy < out_ysize; ++oy) {
-      float *JXL_RESTRICT row_out = out.PlaneRow(c, oy);
+      float *JXL_RESTRICT row_out = out->PlaneRow(c, oy);
       for (size_t ox = 0; ox < out_xsize; ++ox) {
         float sum = 0.0f;
         for (size_t iy = 0; iy < fy; ++iy) {
@@ -765,7 +743,6 @@ static Image3F Downsample(const Image3F &in, size_t fx, size_t fy) {
       }
     }
   }
-  return out;
 }
 
 static void Multiply(const Image3F &a, const Image3F &b, Image3F *mul) {
@@ -806,7 +783,7 @@ static void UpscaleAndAccumulate(const ImageF &in, ImageF &out) {
 
 // Separable FIR Gaussian blur. `temp` is reused across scales via ShrinkTo.
 struct Blur {
-  Blur(size_t xsize, size_t ysize) : temp(xsize, ysize) {
+  Blur(size_t xsize, size_t ysize, ScratchBuffer& scratch) : temp(xsize, ysize, scratch) {
     GaussianKernel(kBlurRadius, kBlurSigma, kernel);
   }
 
@@ -982,31 +959,6 @@ static void EdgeDiffMap(const Image3F &img1, const Image3F &mu1, const Image3F &
   }
 }
 
-/* Get all components in more or less 0..1 range
-   Range of Rec2020 with these adjustments:
-    X: 0.017223..0.998838
-    Y: 0.010000..0.855303
-    B: 0.048759..0.989551
-   Range of sRGB:
-    X: 0.204594..0.813402
-    Y: 0.010000..0.855308
-    B: 0.272295..0.938012
-   The maximum pixel-wise difference has to be <= 1 for the ssim formula to make
-   sense.
-*/
-static void MakePositiveXYB(Image3F &img) {
-  for (size_t y = 0; y < img.ysize(); ++y) {
-    float *JXL_RESTRICT rowY = img.PlaneRow(1, y);
-    float *JXL_RESTRICT rowB = img.PlaneRow(2, y);
-    float *JXL_RESTRICT rowX = img.PlaneRow(0, y);
-    for (size_t x = 0; x < img.xsize(); ++x) {
-      rowB[x] = (rowB[x] - rowY[x]) + 0.55f;
-      rowX[x] = rowX[x] * 14.f + 0.42f;
-      rowY[x] += 0.01f;
-    }
-  }
-}
-
 
 static const uint32_t MagmaMap[256] = {
     0xFF040000, 0xFF050001, 0xFF060101, 0xFF080101, 0xFF090102, 0xFF0B0202, 0xFF0D0202, 0xFF0F0303,
@@ -1044,15 +996,12 @@ static const uint32_t MagmaMap[256] = {
 };
 
 
-static Msssim ComputeSSIMULACRA2(Image3F &orig, Image3F &dist, unsigned char* error_map) {
+static Msssim ComputeSSIMULACRA2(ScratchBuffer& scratch, Image3F& orig, Image3F& dist, unsigned char* error_map) {
   JXL_PROFILE_FUNC
   Msssim msssim = {};
 
-  size_t w = orig.xsize();
-  size_t h = orig.ysize();
-
-  Image3F img1(w, h);
-  Image3F img2(w, h);
+  const size_t w = orig.xsize();
+  const size_t h = orig.ysize();
 
   // Error-map workspace is only needed when the caller asked for one.
   // Saves two ImageF allocs and the per-pixel error_row writes inside
@@ -1061,48 +1010,50 @@ static Msssim ComputeSSIMULACRA2(Image3F &orig, Image3F &dist, unsigned char* er
   ImageF error_accum;
   ImageF error_scale;
   if (want_error_map) {
-    error_accum = ImageF(w, h);
-    error_scale = ImageF(w, h);
+    error_accum = ImageF(w, h, scratch);
+    error_scale = ImageF(w, h, scratch);
     error_scale.Clear();
   }
 
-  // This assumes the input is in srgb.
-  ToXYB(orig, &img1);
-  ToXYB(dist, &img2);
-  MakePositiveXYB(img1);
-  MakePositiveXYB(img2);
+  // ds_orig/ds_dist hold the linear-RGB downsample at scale-1 size. After
+  // pre-loop setup, orig/dist contain XYB at scale 0 (in-place converted)
+  // and ds_orig/ds_dist contain linear RGB at scale 1.
+  //
+  // Inside the scale loop we ping-pong: at any scale s, *xyb_orig/dist
+  // hold XYB at scale s (analyzed), and *linear_orig/dist hold linear RGB
+  // at scale s+1 (ready to downsample). After analysis we downsample
+  // linear_* into xyb_*'s freed buffer (linear at scale s+2), convert
+  // linear_* in-place to XYB (so it now holds XYB at scale s+1), and swap
+  // the pointers. ds_orig/ds_dist are sized for scale 1; orig/dist
+  // (full-size buffers) hold subsequent shrunk-down scales.
+  Image3F ds_orig(w / 2, h / 2, scratch);
+  Image3F ds_dist(w / 2, h / 2, scratch);
 
-  Image3F mul(img1.xsize(), img1.ysize());
-  Blur blur(img1.xsize(), img1.ysize());
+  Downsample(orig, 2, 2, &ds_orig);
+  Downsample(dist, 2, 2, &ds_dist);
+  ToXYB(orig);
+  ToXYB(dist);
 
-  // Per-scale blur outputs, pre-allocated at scale-0 size and reused via
-  // ShrinkTo each scale.
-  Image3F sigma1_sq(w, h);
-  Image3F sigma2_sq(w, h);
-  Image3F sigma12  (w, h);
-  Image3F mu1      (w, h);
-  Image3F mu2      (w, h);
+  Image3F* xyb_orig    = &orig;     // XYB, scale 0
+  Image3F* xyb_dist    = &dist;     // XYB, scale 0
+  Image3F* linear_orig = &ds_orig;  // linear RGB, scale 1
+  Image3F* linear_dist = &ds_dist;  // linear RGB, scale 1
+
+  Image3F mul(w, h, scratch);
+  Blur blur(w, h, scratch);
+  Image3F sigma1_sq(w, h, scratch);
+  Image3F sigma2_sq(w, h, scratch);
+  Image3F sigma12  (w, h, scratch);
+  Image3F mu1      (w, h, scratch);
+  Image3F mu2      (w, h, scratch);
 
   for (int scale = 0; scale < kNumScales; scale++) {
-    if (img1.xsize() < 8 || img1.ysize() < 8) {
+    if (xyb_orig->xsize() < 8 || xyb_orig->ysize() < 8) {
       break;
     }
-    if (scale) {
-      orig = Downsample(orig, 2, 2);
-      dist = Downsample(dist, 2, 2);
-      img1.ShrinkTo(orig.xsize(), orig.ysize());
-      img2.ShrinkTo(orig.xsize(), orig.ysize());
-      ToXYB(orig, &img1);
-      ToXYB(dist, &img2);
-      MakePositiveXYB(img1);
-      MakePositiveXYB(img2);
-      if (want_error_map) {
-        error_scale.ShrinkTo(orig.xsize(), orig.ysize());
-        error_scale.Clear();
-      }
-    }
-    const size_t sx = img1.xsize();
-    const size_t sy = img1.ysize();
+
+    const size_t sx = xyb_orig->xsize();
+    const size_t sy = xyb_orig->ysize();
     mul      .ShrinkTo(sx, sy);
     blur     .ShrinkTo(sx, sy);
     sigma1_sq.ShrinkTo(sx, sy);
@@ -1110,16 +1061,20 @@ static Msssim ComputeSSIMULACRA2(Image3F &orig, Image3F &dist, unsigned char* er
     sigma12  .ShrinkTo(sx, sy);
     mu1      .ShrinkTo(sx, sy);
     mu2      .ShrinkTo(sx, sy);
+    if (want_error_map && scale > 0) {
+      error_scale.ShrinkTo(sx, sy);
+      error_scale.Clear();
+    }
 
-    Multiply(img1, img1, &mul);  blur(mul,  &sigma1_sq);
-    Multiply(img2, img2, &mul);  blur(mul,  &sigma2_sq);
-    Multiply(img1, img2, &mul);  blur(mul,  &sigma12);
-    blur(img1, &mu1);
-    blur(img2, &mu2);
+    Multiply(*xyb_orig, *xyb_orig, &mul);  blur(mul, &sigma1_sq);
+    Multiply(*xyb_dist, *xyb_dist, &mul);  blur(mul, &sigma2_sq);
+    Multiply(*xyb_orig, *xyb_dist, &mul);  blur(mul, &sigma12);
+    blur(*xyb_orig, &mu1);
+    blur(*xyb_dist, &mu2);
 
     ImageF* err = want_error_map ? &error_scale : nullptr;
     SSIMMap(mu1, mu2, sigma1_sq, sigma2_sq, sigma12, msssim.scales[scale].avg_ssim, err, scale);
-    EdgeDiffMap(img1, mu1, img2, mu2, msssim.scales[scale].avg_edgediff, err, scale);
+    EdgeDiffMap(*xyb_orig, mu1, *xyb_dist, mu2, msssim.scales[scale].avg_edgediff, err, scale);
 
     if (want_error_map) {
       if (scale == 0) {
@@ -1128,6 +1083,24 @@ static Msssim ComputeSSIMULACRA2(Image3F &orig, Image3F &dist, unsigned char* er
       else if (scale < 3) {
         UpscaleAndAccumulate(error_scale, error_accum);
       }
+    }
+
+    // Prepare for next scale: linear_* holds linear RGB at scale+1.
+    // Downsample it into xyb_*'s now-free buffer (linear at scale+2),
+    // then in-place ToXYB linear_* (so it holds XYB at scale+1), then
+    // swap so the next iteration sees XYB in xyb_* and linear in linear_*.
+    const size_t next_xs = linear_orig->xsize() / 2;
+    const size_t next_ys = linear_orig->ysize() / 2;
+    if (scale + 1 < kNumScales && next_xs >= 8 && next_ys >= 8) {
+      xyb_orig->ShrinkTo(next_xs, next_ys);
+      xyb_dist->ShrinkTo(next_xs, next_ys);
+      Downsample(*linear_orig, 2, 2, xyb_orig);
+      Downsample(*linear_dist, 2, 2, xyb_dist);
+      ToXYB(*linear_orig);
+      ToXYB(*linear_dist);
+      Image3F* tmp;
+      tmp = xyb_orig; xyb_orig = linear_orig; linear_orig = tmp;
+      tmp = xyb_dist; xyb_dist = linear_dist; linear_dist = tmp;
     }
   }
 
@@ -1224,10 +1197,10 @@ double Msssim::Score() const {
 }
 
 
-Msssim ComputeSSIMULACRA2(int w, int h, const unsigned char* orig, const unsigned char* dist, unsigned char* error_map) {
+Msssim ComputeSSIMULACRA2(ScratchBuffer& scratch, int w, int h, const unsigned char* orig, const unsigned char* dist, unsigned char* error_map) {
   JXL_PROFILE_FUNC
-  Image3F orig_img(w, h);
-  Image3F dist_img(w, h);
+  Image3F orig_img(w, h, scratch);
+  Image3F dist_img(w, h, scratch);
 
   for (int y = 0; y < h; y++) {
     float* orig_r = orig_img.PlaneRow(0, y);
@@ -1274,27 +1247,53 @@ Msssim ComputeSSIMULACRA2(int w, int h, const unsigned char* orig, const unsigne
     }
   }
 
-  return ComputeSSIMULACRA2(orig_img, dist_img, error_map);
+  return ComputeSSIMULACRA2(scratch, orig_img, dist_img, error_map);
 }
 
 } // namespace
 
 
-double ComputeSSIMULACRA2Score(int w, int h, const unsigned char* orig, const unsigned char* dist, unsigned char* error_map) {
-  return ComputeSSIMULACRA2(w, h, orig, dist, error_map).Score();
+// Scratch budget, in floats, sized at the largest scale (w*h):
+//   ic_ssimulacra2_score                without error map     with error map
+//   ----------------------------------- --------------------- --------------------
+//   orig_img, dist_img                     6                    6  (2 Image3F)
+//   ds_orig, ds_dist (at w/2 × h/2)        1.5                  1.5
+//   mul, sigma1_sq, sigma2_sq, sigma12     12                   12
+//   mu1, mu2                               6                    6
+//   blur.temp                              1                    1
+//   error_accum, error_scale               0                    2  (2 ImageF)
+//   ----------------------------------- --------------------- --------------------
+//   Total                                  26.5                 28.5
+//
+// Rounded up to integer-multiple-of-wh = 29 (caller doesn't know in advance
+// whether they'll pass an error_map). Down from 35 wh before the in-place
+// ToXYB refactor that retired the separate img1/img2 buffers.
+size_t ic_ssimulacra2_score_scratch_size(int w, int h) {
+    return usize(w) * usize(h) * sizeof(float) * 29;
+}
+
+double ic_ssimulacra2_score(int w, int h, const unsigned char* orig, const unsigned char* dist, void* scratch_ptr, unsigned char* error_map) {
+  ScratchBuffer scratch = { scratch_ptr, ic_ssimulacra2_score_scratch_size(w, h), 0 };
+  return ComputeSSIMULACRA2(scratch, w, h, orig, dist, error_map).Score();
 }
 
 
-double ComputeSSIMScore(int w, int h, const unsigned char* orig, const unsigned char* dist, unsigned char* error_map) {
+size_t ic_ssim_score_scratch_size(int w, int h) {
+  return usize(w) * usize(h) * sizeof(float) * 9;
+}
+
+double ic_ssim_score(int w, int h, const unsigned char* orig, const unsigned char* dist, void* scratch_ptr, unsigned char* error_map) {
   JXL_PROFILE_FUNC
+
+  ScratchBuffer scratch = { scratch_ptr, ic_ssim_score_scratch_size(w, h), 0 };
 
   // Standard SSIM constants for [0,1] range (Wang et al. 2004).
   // C1 = (K1*L)^2, C2 = (K2*L)^2, with K1=0.01, K2=0.03, L=1.
   static const float kC1 = 0.0001f;
   static const float kC2 = 0.0009f;
 
-  ImageF img1(w, h);
-  ImageF img2(w, h);
+  ImageF img1(w, h, scratch);
+  ImageF img2(w, h, scratch);
 
   // RGBA8 → Rec.601 luma in [0,1]. Standard SSIM operates on
   // gamma-corrected luma (i.e. the sRGB bytes directly, no
@@ -1313,21 +1312,21 @@ double ComputeSSIMScore(int w, int h, const unsigned char* orig, const unsigned 
     }
   }
 
-  Blur blur(w, h);
+  Blur blur(w, h, scratch);
 
   // mu1 = blur(img1), mu2 = blur(img2)
-  ImageF mu1(w, h);
-  ImageF mu2(w, h);
+  ImageF mu1(w, h, scratch);
+  ImageF mu2(w, h, scratch);
   blur(img1, &mu1);
   blur(img2, &mu2);
 
   // sigma1_sq = blur(img1*img1) - mu1*mu1
   // sigma2_sq = blur(img2*img2) - mu2*mu2
   // sigma12   = blur(img1*img2) - mu1*mu2
-  ImageF tmp(w, h);
-  ImageF sigma1_sq(w, h);
-  ImageF sigma2_sq(w, h);
-  ImageF sigma12(w, h);
+  ImageF tmp(w, h, scratch);
+  ImageF sigma1_sq(w, h, scratch);
+  ImageF sigma2_sq(w, h, scratch);
+  ImageF sigma12(w, h, scratch);
 
   for (int y = 0; y < h; y++) {
     const float* r1 = img1.Row(y);
