@@ -21,6 +21,8 @@
 #include "ic_vars.h"
 #include "impls.h"
 
+#include <omp.h>
+
 IC_VAR_DECL(int, ssimu2_blur_wrap_mode);
 IC_VAR_DECL(bool, ssimu2_blur_simd);
 // Must match BlurWrapMode in ic_metrics.cpp.
@@ -225,6 +227,10 @@ int main(int argc, char** argv) {
     }
 
     if (g_iters < 1) g_iters = 1;
+
+    // OpenMP thread count for our impl. Without --threads, OMP picks
+    // its default (typically all logical CPUs).
+    if (threads > 0) omp_set_num_threads(threads);
 
 #if HAVE_RUST_AV
     // rust-av's ssimulacra2 port is built on Rayon, Rust's work-stealing

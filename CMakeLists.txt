@@ -25,6 +25,22 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
     endif()
 endif()
 
+# OpenMP — Apple clang doesn't bundle a runtime; hint find_package at brew's
+# libomp prefix so OpenMP_ROOT detection picks it up.
+if(APPLE AND NOT OpenMP_ROOT)
+    find_program(BREW_EXECUTABLE brew)
+    if(BREW_EXECUTABLE)
+        execute_process(COMMAND ${BREW_EXECUTABLE} --prefix libomp
+                        OUTPUT_VARIABLE BREW_LIBOMP_PREFIX
+                        OUTPUT_STRIP_TRAILING_WHITESPACE
+                        ERROR_QUIET)
+        if(BREW_LIBOMP_PREFIX AND EXISTS "${BREW_LIBOMP_PREFIX}/lib/libomp.dylib")
+            set(OpenMP_ROOT "${BREW_LIBOMP_PREFIX}")
+        endif()
+    endif()
+endif()
+find_package(OpenMP REQUIRED)
+
 
 ################################
 # Metrics library
@@ -37,6 +53,7 @@ add_library(ic_metrics STATIC
     src/ic_shared.h
 )
 target_include_directories(ic_metrics PUBLIC src)
+target_link_libraries(ic_metrics PUBLIC OpenMP::OpenMP_CXX)
 
 
 ################################

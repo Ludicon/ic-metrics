@@ -391,6 +391,7 @@ static void ToXYB(Image3F& img) {
   const size_t xsize = img.xsize();
   const size_t ysize = img.ysize();
 
+  #pragma omp parallel for
   for (size_t y = 0; y < ysize; y ++) {
     float* JXL_RESTRICT row0 = img.PlaneRow(0, y);
     float* JXL_RESTRICT row1 = img.PlaneRow(1, y);
@@ -568,6 +569,7 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
   float kloc[R + 1];
   for (int i = 0; i <= R; ++i) kloc[i] = kernel[R + i];
 
+  #pragma omp parallel for
   for (isize y = 0; y < h; ++y) {
     const float* JXL_RESTRICT rowp = in.Row(y);
     float* JXL_RESTRICT rowout = out->Row(y);
@@ -680,6 +682,7 @@ static void ConvolveVertical(const ImageF& in, ImageF* JXL_RESTRICT out, const f
     }
 
     // Interior: no bounds checks.
+    #pragma omp parallel for
     for (isize y = R; y < h - R; ++y) {
       float* JXL_RESTRICT rowout = out->Row(y);
       const float* JXL_RESTRICT row_c = in.Row(y);
@@ -740,6 +743,7 @@ static void Downsample(const Image3F &in, size_t fx, size_t fy, Image3F* out) {
   ic_assert(out_ysize == (in.ysize() + fy - 1) / fy);
   const float normalize = 1.0f / (fx * fy);
   for (size_t c = 0; c < 3; ++c) {
+    #pragma omp parallel for
     for (size_t oy = 0; oy < out_ysize; ++oy) {
       float *JXL_RESTRICT row_out = out->PlaneRow(c, oy);
       for (size_t ox = 0; ox < out_xsize; ++ox) {
@@ -761,6 +765,7 @@ static void MultiplyPlane(const ImageF &a, const ImageF &b, ImageF *mul) {
   JXL_PROFILE_FUNC
   ic_assert(a.xsize() == b.xsize() && a.ysize() == b.ysize());
   ic_assert(a.xsize() == mul->xsize() && a.ysize() == mul->ysize());
+  #pragma omp parallel for
   for (size_t y = 0; y < a.ysize(); ++y) {
     const float *JXL_RESTRICT in1 = a.Row(y);
     const float *JXL_RESTRICT in2 = b.Row(y);
@@ -778,6 +783,7 @@ static void UpscaleAndAccumulate(const ImageF &in, ImageF &out) {
   const size_t h = out.ysize();
   const size_t w = out.xsize();
 
+  #pragma omp parallel for
   for (size_t y = 0; y < h; y++) {
     float fy = float(y) * (1.0f / h);
     float* row_out = out.Row(y);
@@ -1146,6 +1152,7 @@ static Msssim ComputeSSIMULACRA2(ScratchBuffer& scratch, Image3F& orig, Image3F&
 
   if (error_map != nullptr) {
     // Remap scalar error values to magma color palette.
+    #pragma omp parallel for
     for (size_t y = 0; y < h; y++) {
       for (size_t x = 0; x < w; x++) {
         float ssim = error_accum.texel(x,y);
@@ -1224,6 +1231,7 @@ Msssim ComputeSSIMULACRA2(ScratchBuffer& scratch, int w, int h, const unsigned c
   Image3F orig_img(w, h, scratch);
   Image3F dist_img(w, h, scratch);
 
+  #pragma omp parallel for
   for (int y = 0; y < h; y++) {
     float* orig_r = orig_img.PlaneRow(0, y);
     float* orig_g = orig_img.PlaneRow(1, y);
@@ -1247,6 +1255,7 @@ Msssim ComputeSSIMULACRA2(ScratchBuffer& scratch, int w, int h, const unsigned c
     }
   }
 
+  #pragma omp parallel for
   for (int y = 0; y < h; y++) {
     float* dist_r = dist_img.PlaneRow(0, y);
     float* dist_g = dist_img.PlaneRow(1, y);
@@ -1335,6 +1344,7 @@ double ic_ssim_score(int w, int h, const unsigned char* orig, const unsigned cha
   {
     float* row1 = img1.data;
     float* row2 = img2.data;
+    #pragma omp parallel for
     for (size_t i = 0; i < n; i++) {
       row1[i] = kR * orig[4*i + 0] + kG * orig[4*i + 1] + kB * orig[4*i + 2];
       row2[i] = kR * dist[4*i + 0] + kG * dist[4*i + 1] + kB * dist[4*i + 2];
@@ -1361,10 +1371,13 @@ double ic_ssim_score(int w, int h, const unsigned char* orig, const unsigned cha
     const float* p1 = img1.data;
     const float* p2 = img2.data;
     float* pt = tmp.data;
+    #pragma omp parallel for
     for (size_t i = 0; i < n; i++) pt[i] = p1[i] * p1[i];
     blur(tmp, &sigma1_sq);
+    #pragma omp parallel for
     for (size_t i = 0; i < n; i++) pt[i] = p2[i] * p2[i];
     blur(tmp, &sigma2_sq);
+    #pragma omp parallel for
     for (size_t i = 0; i < n; i++) pt[i] = p1[i] * p2[i];
     blur(tmp, &sigma12);
   }
