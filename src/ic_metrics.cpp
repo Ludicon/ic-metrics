@@ -883,16 +883,19 @@ static void SSIMMap(const Image3F &m1, const Image3F &m2, const Image3F &s11,
     // Pruned: weights are below threshold, so s11/s22/s12/mu for this plane
     // were never computed. Averages stay 0 (Msssim is zero-initialized).
     if (!active[c]) continue;
-    double sum1[2] = {};
+    double s_lin = 0.0, s_quad = 0.0;
     const float w_err = error_map ? float(get_weight(c, scale, 0, 0) + get_weight(c, scale, 0, 1)) : 0.0f;
-    for (size_t y = 0; y < m1.ysize(); ++y) {
+    const size_t ysize = m1.ysize();
+    const size_t xsize = m1.xsize();
+    #pragma omp parallel for reduction(+:s_lin, s_quad)
+    for (size_t y = 0; y < ysize; ++y) {
       const float *JXL_RESTRICT row_m1 = m1.PlaneRow(c, y);
       const float *JXL_RESTRICT row_m2 = m2.PlaneRow(c, y);
       const float *JXL_RESTRICT row_s11 = s11.PlaneRow(c, y);
       const float *JXL_RESTRICT row_s22 = s22.PlaneRow(c, y);
       const float *JXL_RESTRICT row_s12 = s12.PlaneRow(c, y);
       float *JXL_RESTRICT error_row = error_map ? error_map->Row(y) : nullptr;
-      for (size_t x = 0; x < m1.xsize(); ++x) {
+      for (size_t x = 0; x < xsize; ++x) {
         float mu1 = row_m1[x];
         float mu2 = row_m2[x];
         float mu11 = mu1 * mu1;
@@ -920,8 +923,8 @@ static void SSIMMap(const Image3F &m1, const Image3F &m2, const Image3F &s11,
         double d = 1.0 - (num_m * num_s / denom_s);
         d = max(d, 0.0);
         double d4 = tothe4th(d);
-        sum1[0] += d;
-        sum1[1] += d4;
+        s_lin  += d;
+        s_quad += d4;
 
         if (error_row) {
           error_row[x] += w_err * float(d);
@@ -929,8 +932,8 @@ static void SSIMMap(const Image3F &m1, const Image3F &m2, const Image3F &s11,
         }
       }
     }
-    plane_averages[c * 2] = onePerPixels * sum1[0];
-    plane_averages[c * 2 + 1] = sqrt(sqrt(onePerPixels * sum1[1]));
+    plane_averages[c * 2]     = onePerPixels * s_lin;
+    plane_averages[c * 2 + 1] = sqrt(sqrt(onePerPixels * s_quad));
   }
 }
 
@@ -942,31 +945,36 @@ static void EdgeDiffMap(const Image3F &img1, const Image3F &mu1, const Image3F &
   for (int c = 0; c < 3; ++c) {
     // Pruned: mu for this plane was never computed. Averages stay 0.
     if (!active[c]) continue;
-    float sum1[4] = {0.0f};
+    // Accumulators promoted to double to minimize float associativity error.
+    double s_art_lin = 0.0, s_art_quad = 0.0;
+    double s_det_lin = 0.0, s_det_quad = 0.0;
     const float w_artif  = error_map ? float(get_weight(c, scale, 1, 0) + get_weight(c, scale, 1, 1)) : 0.0f;
     const float w_detail = error_map ? float(get_weight(c, scale, 2, 0) + get_weight(c, scale, 2, 1)) : 0.0f;
-    for (size_t y = 0; y < img1.ysize(); ++y) {
+    const size_t ysize = img1.ysize();
+    const size_t xsize = img1.xsize();
+    #pragma omp parallel for reduction(+:s_art_lin, s_art_quad, s_det_lin, s_det_quad)
+    for (size_t y = 0; y < ysize; ++y) {
       const float *JXL_RESTRICT row1 = img1.PlaneRow(c, y);
       const float *JXL_RESTRICT row2 = img2.PlaneRow(c, y);
       const float *JXL_RESTRICT rowm1 = mu1.PlaneRow(c, y);
       const float *JXL_RESTRICT rowm2 = mu2.PlaneRow(c, y);
       float *JXL_RESTRICT error_row = error_map ? error_map->Row(y) : nullptr;
-      for (size_t x = 0; x < img1.xsize(); ++x) {
+      for (size_t x = 0; x < xsize; ++x) {
         float d1 = (1.0f + fabsf(row2[x] - rowm2[x])) / (1.0f + fabsf(row1[x] - rowm1[x])) - 1.0f;
 
         // d1 > 0: distorted has an edge where original is smooth
         //         (indicating ringing, color banding, blockiness, etc)
         float artifact = max(d1, 0.0f);
         float artifact4 = tothe4th(artifact);
-        sum1[0] += artifact;
-        sum1[1] += artifact4;
+        s_art_lin  += artifact;
+        s_art_quad += artifact4;
 
         // d1 < 0: original has an edge where distorted is smooth
         //         (indicating smoothing, blurring, smearing, etc)
         float detail_lost = max(-d1, 0.0f);
         float detail_lost4 = tothe4th(detail_lost);
-        sum1[2] += detail_lost;
-        sum1[3] += detail_lost4;
+        s_det_lin  += detail_lost;
+        s_det_quad += detail_lost4;
 
         if (error_row) {
           error_row[x] += w_artif  * fabsf(artifact)
@@ -975,10 +983,10 @@ static void EdgeDiffMap(const Image3F &img1, const Image3F &mu1, const Image3F &
         }
       }
     }
-    plane_averages[c * 4] = onePerPixels * sum1[0];
-    plane_averages[c * 4 + 1] = sqrt(sqrt(onePerPixels * sum1[1]));
-    plane_averages[c * 4 + 2] = onePerPixels * sum1[2];
-    plane_averages[c * 4 + 3] = sqrt(sqrt(onePerPixels * sum1[3]));
+    plane_averages[c * 4]     = onePerPixels * s_art_lin;
+    plane_averages[c * 4 + 1] = sqrt(sqrt(onePerPixels * s_art_quad));
+    plane_averages[c * 4 + 2] = onePerPixels * s_det_lin;
+    plane_averages[c * 4 + 3] = sqrt(sqrt(onePerPixels * s_det_quad));
   }
 }
 
