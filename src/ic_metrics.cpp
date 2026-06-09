@@ -50,9 +50,8 @@ Design:
 
 #if __has_include("ic_profiler.h")
   #include "ic_profiler.h"
-  #define JXL_PROFILE_FUNC IC_PROFILE_FUNC
 #else
-  #define JXL_PROFILE_FUNC
+  #define IC_PROFILE_FUNC
 #endif
 
 #if __has_include("ic_vars.h")
@@ -98,15 +97,57 @@ IC_VAR_INT(ssimu2_blur_wrap_mode, BlurWrapMode_ClampEdge);
 
 #define JXL_RESTRICT __restrict
 
-
-namespace {
-
 // Pointer-sized signed/unsigned integers for indexing — short aliases used
 // throughout this file. Local to ic_metrics.cpp on purpose; not exposed
 // in any public header. If we ever target a non-64-bit platform, change
 // these here and we're done.
 typedef intptr_t  isize;
 typedef uintptr_t usize;
+
+
+////////////////////////////////
+// Job System
+
+static void ic_run_jobs_default(ic_job* job, void* context, unsigned int count, unsigned int batch_size) {
+    for (unsigned int i = 0; i < count; i++) {
+        job(context, i);
+    }
+}
+
+ic_run_jobs* g_run_jobs = ic_run_jobs_default;
+
+void ic_set_job_system_callbacks(ic_run_jobs *job_runner) {
+    g_run_jobs = job_runner;
+}
+
+template <typename F>
+IC_FORCEINLINE void dispatch(unsigned int count, unsigned int step, F f) {
+    if (g_run_jobs == ic_run_jobs_default) {
+        for (unsigned int i = 0; i < count; ++i) f(i);
+        return;
+    }
+
+    // Transform lambda into function pointer.
+    auto lambda = [](void* context, unsigned int idx) {
+        F& f = *reinterpret_cast<F*>(context);
+        f(idx);
+    };
+
+    g_run_jobs(lambda, &f, count, step);
+}
+
+struct DispatchHelp {
+    unsigned int count;
+    unsigned int step;
+    template<typename F> IC_FORCEINLINE void operator+(F f) { dispatch(count, step, (F)f); }
+};
+
+#define pfor(IDX, COUNT, STEP) DispatchHelp { COUNT, STEP } + [&](unsigned int IDX)
+
+constexpr int step = 16; // default step size
+
+
+namespace {
 
 // Internal aggregate; not part of the public API.
 struct MsssimScale {
@@ -360,7 +401,7 @@ static float LinearFromSRGB(float x) {
 }
 
 static void ToXYB(Image3F& img) {
-  JXL_PROFILE_FUNC
+  IC_PROFILE_FUNC
 
   // Pre-broadcasted constants
   float M[12];
@@ -377,7 +418,7 @@ static void ToXYB(Image3F& img) {
   const size_t xsize = img.xsize();
   const size_t ysize = img.ysize();
 
-  for (size_t y = 0; y < ysize; y ++) {
+  pfor (y, (unsigned)ysize, step) {
     float* JXL_RESTRICT row0 = img.PlaneRow(0, y);
     float* JXL_RESTRICT row1 = img.PlaneRow(1, y);
     float* JXL_RESTRICT row2 = img.PlaneRow(2, y);
@@ -429,7 +470,7 @@ static void ToXYB(Image3F& img) {
       row1[x] = Y;
       row2[x] = B;
     }
-  }
+  };
 
 }
 
@@ -542,6 +583,7 @@ IC_FORCEINLINE f32x8 fma(f32x8 acc, f32x8 v, float s) {
 
 
 static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const float* JXL_RESTRICT kernel) {
+  IC_PROFILE_FUNC
   const isize w = in.xsize();
   const isize h = in.ysize();
   const int mode = var::ssimu2_blur_wrap_mode;
@@ -554,7 +596,8 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
   float kloc[R + 1];
   for (int i = 0; i <= R; ++i) kloc[i] = kernel[R + i];
 
-  for (isize y = 0; y < h; ++y) {
+  pfor (y, (unsigned)h, step) {
+    const float* JXL_RESTRICT kp = kloc;
     const float* JXL_RESTRICT rowp = in.Row(y);
     float* JXL_RESTRICT rowout = out->Row(y);
     isize x = 0;
@@ -562,11 +605,11 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
     // Left border: [0, min(R, w)). Uses sample_h for off-image taps.
     const isize x_left_end = min((isize)R, w);
     for (; x < x_left_end; ++x) {
-      float sum = kloc[0] * sample_h(rowp, x, w, mode);
+      float sum = kp[0] * sample_h(rowp, x, w, mode);
       for (int i = 1; i <= R; ++i) {
         const float l = sample_h(rowp, x - i, w, mode);
         const float right = sample_h(rowp, x + i, w, mode);
-        sum += kloc[i] * (l + right);
+        sum += kp[i] * (l + right);
       }
       rowout[x] = sum;
     }
@@ -577,9 +620,9 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
       // 8-wide via the f32x8 helper layer. Up to 7 leftover pixels fall
       // through to the right-border loop (sample_h, ~0.15% overhead).
       for (; x + 7 < w - R; x += 8) {
-        f32x8 sum = mul(load(rowp + x), kloc[0]);
+        f32x8 sum = mul(load(rowp + x), kp[0]);
         for (int i = 1; i <= R; ++i) {
-          sum = fma(sum, add(load(rowp + x - i), load(rowp + x + i)), kloc[i]);
+          sum = fma(sum, add(load(rowp + x - i), load(rowp + x + i)), kp[i]);
         }
         store(rowout + x, sum);
       }
@@ -588,9 +631,9 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
 #endif
     {
       for (; x < w - R; ++x) {
-        float sum = kloc[0] * rowp[x];
+        float sum = kp[0] * rowp[x];
         for (int i = 1; i <= R; ++i) {
-          sum += kloc[i] * (rowp[x + i] + rowp[x - i]);
+          sum += kp[i] * (rowp[x + i] + rowp[x - i]);
         }
         rowout[x] = sum;
       }
@@ -598,15 +641,15 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
 
     // Right border (and NEON interior remainder): from wherever we stopped to w.
     for (; x < w; ++x) {
-      float sum = kloc[0] * sample_h(rowp, x, w, mode);
+      float sum = kp[0] * sample_h(rowp, x, w, mode);
       for (int i = 1; i <= R; ++i) {
         const float l = sample_h(rowp, x - i, w, mode);
         const float right = sample_h(rowp, x + i, w, mode);
-        sum += kloc[i] * (l + right);
+        sum += kp[i] * (l + right);
       }
       rowout[x] = sum;
     }
-  }
+  };
 }
 
 // Map a (possibly out-of-bounds) row index to an in-bounds one per wrap mode.
@@ -665,36 +708,39 @@ static void ConvolveVertical(const ImageF& in, ImageF* JXL_RESTRICT out, const f
       }
     }
 
-    // Interior: no bounds checks.
-    for (isize y = R; y < h - R; ++y) {
-      float* JXL_RESTRICT rowout = out->Row(y);
-      const float* JXL_RESTRICT row_c = in.Row(y);
-      isize x = x0;
+    // Interior: no bounds checks. Parallel over y.
+    if (h > 2 * R) {
+      pfor (yoff, (unsigned)(h - 2 * R), step) {
+        const isize y = R + yoff;
+        float* JXL_RESTRICT rowout = out->Row(y);
+        const float* JXL_RESTRICT row_c = in.Row(y);
+        isize x = x0;
 #if IC_HAS_F32X8
-      if (var::ssimu2_blur_simd) {
-        // Row pointers hoisted once per y; inner i loop unrolls with R constexpr.
-        const float* row_up[R];
-        const float* row_dn[R];
-        for (int i = 0; i < R; ++i) {
-          row_up[i] = in.Row(y - (i + 1));
-          row_dn[i] = in.Row(y + (i + 1));
-        }
-        for (; x + 7 < x1; x += 8) {
-          f32x8 sum = mul(load(row_c + x), kloc[0]);
+        if (var::ssimu2_blur_simd) {
+          // Row pointers hoisted once per y; inner i loop unrolls with R constexpr.
+          const float* row_up[R];
+          const float* row_dn[R];
           for (int i = 0; i < R; ++i) {
-            sum = fma(sum, add(load(row_up[i] + x), load(row_dn[i] + x)), kloc[i + 1]);
+            row_up[i] = in.Row(y - (i + 1));
+            row_dn[i] = in.Row(y + (i + 1));
           }
-          store(rowout + x, sum);
+          for (; x + 7 < x1; x += 8) {
+            f32x8 sum = mul(load(row_c + x), kloc[0]);
+            for (int i = 0; i < R; ++i) {
+              sum = fma(sum, add(load(row_up[i] + x), load(row_dn[i] + x)), kloc[i + 1]);
+            }
+            store(rowout + x, sum);
+          }
         }
-      }
 #endif
-      for (; x < x1; ++x) {
-        float sum = kloc[0] * row_c[x];
-        for (int i = 1; i <= R; ++i) {
-          sum += kloc[i] * (in.Row(y + i)[x] + in.Row(y - i)[x]);
+        for (; x < x1; ++x) {
+          float sum = kloc[0] * row_c[x];
+          for (int i = 1; i <= R; ++i) {
+            sum += kloc[i] * (in.Row(y + i)[x] + in.Row(y - i)[x]);
+          }
+          rowout[x] = sum;
         }
-        rowout[x] = sum;
-      }
+      };
     }
 
     // Bottom border.
@@ -719,14 +765,14 @@ static void ConvolveVertical(const ImageF& in, ImageF* JXL_RESTRICT out, const f
 // allocate here. Safe in-place when in and out share the same backing
 // buffer (writes lag reads in row-major order).
 static void Downsample(const Image3F &in, size_t fx, size_t fy, Image3F* out) {
-  JXL_PROFILE_FUNC
+  IC_PROFILE_FUNC
   const size_t out_xsize = out->xsize();
   const size_t out_ysize = out->ysize();
   JXL_CHECK(out_xsize == (in.xsize() + fx - 1) / fx);
   JXL_CHECK(out_ysize == (in.ysize() + fy - 1) / fy);
   const float normalize = 1.0f / (fx * fy);
   for (size_t c = 0; c < 3; ++c) {
-    for (size_t oy = 0; oy < out_ysize; ++oy) {
+    pfor (oy, (unsigned)out_ysize, step) {
       float *JXL_RESTRICT row_out = out->PlaneRow(c, oy);
       for (size_t ox = 0; ox < out_xsize; ++ox) {
         float sum = 0.0f;
@@ -739,34 +785,36 @@ static void Downsample(const Image3F &in, size_t fx, size_t fy, Image3F* out) {
         }
         row_out[ox] = sum * normalize;
       }
-    }
+    };
   }
 }
 
 static void Multiply(const Image3F &a, const Image3F &b, Image3F *mul) {
-  JXL_PROFILE_FUNC
+  IC_PROFILE_FUNC
   JXL_CHECK(SameSize(a, b));
   JXL_CHECK(SameSize(a, *mul));
+  const size_t ysize = a.ysize();
+  const size_t xsize = a.xsize();
   for (size_t c = 0; c < 3; ++c) {
-    for (size_t y = 0; y < a.ysize(); ++y) {
+    pfor (y, (unsigned)ysize, step) {
       const float *JXL_RESTRICT in1 = a.PlaneRow(c, y);
       const float *JXL_RESTRICT in2 = b.PlaneRow(c, y);
       float *JXL_RESTRICT out = mul->PlaneRow(c, y);
-      for (size_t x = 0; x < a.xsize(); ++x) {
+      for (size_t x = 0; x < xsize; ++x) {
         out[x] = in1[x] * in2[x];
       }
-    }
+    };
   }
 }
 
 static void UpscaleAndAccumulate(const ImageF &in, ImageF &out) {
-  JXL_PROFILE_FUNC
+  IC_PROFILE_FUNC
 
   // For each pixel in out, bilinearly sample in?
   const size_t h = out.ysize();
   const size_t w = out.xsize();
 
-  for (size_t y = 0; y < h; y++) {
+  pfor (y, (unsigned)h, step) {
     float fy = float(y) * (1.0f / h);
     float* row_out = out.Row(y);
     for (size_t x = 0; x < w; x++) {
@@ -775,7 +823,7 @@ static void UpscaleAndAccumulate(const ImageF &in, ImageF &out) {
       JXL_CHECK(isfinite(value));
       row_out[x] += value;
     }
-  }
+  };
 }
 
 
@@ -857,7 +905,7 @@ inline double get_weight(int c, int scale, int map, int norm) {
 
 static void SSIMMap(const Image3F &m1, const Image3F &m2, const Image3F &s11,
                     const Image3F &s22, const Image3F &s12, double* JXL_RESTRICT plane_averages, ImageF* error_map, int scale) {
-  JXL_PROFILE_FUNC
+  IC_PROFILE_FUNC
   static const float kC2 = 0.0009f;
   const double onePerPixels = 1.0 / (m1.ysize() * m1.xsize());
   for (int c = 0; c < 3; ++c) {
@@ -914,7 +962,7 @@ static void SSIMMap(const Image3F &m1, const Image3F &m2, const Image3F &s11,
 
 static void EdgeDiffMap(const Image3F &img1, const Image3F &mu1, const Image3F &img2,
                         const Image3F &mu2, double *plane_averages, ImageF* error_map, int scale) {
-  JXL_PROFILE_FUNC
+  IC_PROFILE_FUNC
   const double onePerPixels = 1.0 / (img1.ysize() * img1.xsize());
   for (int c = 0; c < 3; ++c) {
     float sum1[4] = {0.0f};
@@ -995,7 +1043,7 @@ static const uint32_t MagmaMap[256] = {
 
 
 static Msssim ComputeSSIMULACRA2(ScratchBuffer& scratch, Image3F& orig, Image3F& dist, unsigned char* error_map) {
-  JXL_PROFILE_FUNC
+  IC_PROFILE_FUNC
   Msssim msssim = {};
 
   const size_t w = orig.xsize();
@@ -1104,7 +1152,7 @@ static Msssim ComputeSSIMULACRA2(ScratchBuffer& scratch, Image3F& orig, Image3F&
 
   if (error_map != nullptr) {
     // Remap scalar error values to magma color palette.
-    for (size_t y = 0; y < h; y++) {
+    pfor (y, (unsigned)h, step) {
       for (size_t x = 0; x < w; x++) {
         float ssim = error_accum.texel(x,y);
 
@@ -1121,7 +1169,7 @@ static Msssim ComputeSSIMULACRA2(ScratchBuffer& scratch, Image3F& orig, Image3F&
         int value = int(255 * clamp(ssim, 0.0f, 1.0f));
         ((uint32_t*)error_map)[y * w + x] = MagmaMap[value];
       }
-    }
+    };
   }
 
   return msssim;
@@ -1152,7 +1200,7 @@ Final results after tuning (Kendall | Spearman | Pearson):
    KonFiG(F): 0.7668 | 0.9194 | 0.9136
 */
 double Msssim::Score() const {
-  JXL_PROFILE_FUNC
+  IC_PROFILE_FUNC
   double ssim = 0.0;
 
   size_t i = 0;
@@ -1178,11 +1226,11 @@ double Msssim::Score() const {
 
 
 Msssim ComputeSSIMULACRA2(ScratchBuffer& scratch, int w, int h, const unsigned char* orig, const unsigned char* dist, unsigned char* error_map) {
-  JXL_PROFILE_FUNC
+  IC_PROFILE_FUNC
   Image3F orig_img(w, h, scratch);
   Image3F dist_img(w, h, scratch);
 
-  for (int y = 0; y < h; y++) {
+  pfor (y, (unsigned)h, step) {
     float* orig_r = orig_img.PlaneRow(0, y);
     float* orig_g = orig_img.PlaneRow(1, y);
     float* orig_b = orig_img.PlaneRow(2, y);
@@ -1203,9 +1251,9 @@ Msssim ComputeSSIMULACRA2(ScratchBuffer& scratch, int w, int h, const unsigned c
         orig_b[x] = b;
       }
     }
-  }
+  };
 
-  for (int y = 0; y < h; y++) {
+  pfor (y, (unsigned)h, step) {
     float* dist_r = dist_img.PlaneRow(0, y);
     float* dist_g = dist_img.PlaneRow(1, y);
     float* dist_b = dist_img.PlaneRow(2, y);
@@ -1225,7 +1273,7 @@ Msssim ComputeSSIMULACRA2(ScratchBuffer& scratch, int w, int h, const unsigned c
         dist_b[x] = b;
       }
     }
-  }
+  };
 
   return ComputeSSIMULACRA2(scratch, orig_img, dist_img, error_map);
 }
@@ -1263,7 +1311,7 @@ size_t ic_ssim_score_scratch_size(int w, int h) {
 }
 
 double ic_ssim_score(int w, int h, const unsigned char* orig, const unsigned char* dist, void* scratch_ptr, unsigned char* error_map) {
-  JXL_PROFILE_FUNC
+  IC_PROFILE_FUNC
 
   ScratchBuffer scratch = { scratch_ptr, ic_ssim_score_scratch_size(w, h), 0 };
 
@@ -1281,7 +1329,7 @@ double ic_ssim_score(int w, int h, const unsigned char* orig, const unsigned cha
   constexpr float kR = 0.299f / 255.0f;
   constexpr float kG = 0.587f / 255.0f;
   constexpr float kB = 0.114f / 255.0f;
-  for (int y = 0; y < h; y++) {
+  pfor (y, (unsigned)h, step) {
     float* row1 = img1.Row(y);
     float* row2 = img2.Row(y);
     const unsigned char* p1 = orig + y * w * 4;
@@ -1290,7 +1338,7 @@ double ic_ssim_score(int w, int h, const unsigned char* orig, const unsigned cha
       row1[x] = kR * p1[4*x + 0] + kG * p1[4*x + 1] + kB * p1[4*x + 2];
       row2[x] = kR * p2[4*x + 0] + kG * p2[4*x + 1] + kB * p2[4*x + 2];
     }
-  }
+  };
 
   Blur blur(w, h, scratch);
 
@@ -1308,26 +1356,26 @@ double ic_ssim_score(int w, int h, const unsigned char* orig, const unsigned cha
   ImageF sigma2_sq(w, h, scratch);
   ImageF sigma12(w, h, scratch);
 
-  for (int y = 0; y < h; y++) {
+  pfor (y, (unsigned)h, step) {
     const float* r1 = img1.Row(y);
     float* rt = tmp.Row(y);
     for (int x = 0; x < w; x++) rt[x] = r1[x] * r1[x];
-  }
+  };
   blur(tmp, &sigma1_sq);
 
-  for (int y = 0; y < h; y++) {
+  pfor (y, (unsigned)h, step) {
     const float* r2 = img2.Row(y);
     float* rt = tmp.Row(y);
     for (int x = 0; x < w; x++) rt[x] = r2[x] * r2[x];
-  }
+  };
   blur(tmp, &sigma2_sq);
 
-  for (int y = 0; y < h; y++) {
+  pfor (y, (unsigned)h, step) {
     const float* r1 = img1.Row(y);
     const float* r2 = img2.Row(y);
     float* rt = tmp.Row(y);
     for (int x = 0; x < w; x++) rt[x] = r1[x] * r2[x];
-  }
+  };
   blur(tmp, &sigma12);
 
   // Compute SSIM map and accumulate mean.

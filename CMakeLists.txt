@@ -35,6 +35,8 @@ add_library(ic_metrics STATIC
     src/ic_vars.cpp
     src/ic_vars.h
     src/ic_shared.h
+    src/ic_pfor.cpp
+    src/ic_pfor.h
 )
 target_include_directories(ic_metrics PUBLIC src)
 

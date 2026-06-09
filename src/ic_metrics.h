@@ -25,3 +25,8 @@ size_t ic_ssim_score_scratch_size(int w, int h);
 double ic_ssim_score(int w, int h, const unsigned char *orig,
                      const unsigned char *dist, void *scratch_ptr,
                      unsigned char *error_map = nullptr);
+
+typedef void ic_job(void *context, unsigned int id);
+typedef void ic_run_jobs(ic_job *job, void *context, unsigned int count,
+                         unsigned int batch_size);
+void ic_set_job_system_callbacks(ic_run_jobs *job_runner);

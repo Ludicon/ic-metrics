@@ -7,6 +7,7 @@
 // (orig, dist) pair. Emits CSV to stdout:  image,impl,distortion,score
 
 #include "harness.h"
+#include "ic_pfor.h"
 #include "ic_shared.h"
 #include "ic_metrics.h"
 #include "impls.h"
@@ -92,6 +93,10 @@ static void process_image(const char* path, void* /*ctx*/) {
 
 int main(int argc, char** argv) {
     const char* data_dir = (argc > 1) ? argv[1] : "data";
+
+    // Bring up the ic_pfor worker pool and route our internal pfor through it.
+    ic::pfor_init(0, true);
+    ic_set_job_system_callbacks(ic::pfor_run);
 
     int n = harness_for_each_png(data_dir, nullptr, nullptr);
     if (n < 0) {

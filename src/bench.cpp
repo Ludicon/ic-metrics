@@ -15,6 +15,7 @@
 //   data_dir       defaults to "data"
 
 #include "harness.h"
+#include "ic_pfor.h"
 #include "ic_shared.h"
 #include "ic_metrics.h"
 #include "ic_vars.h"
@@ -210,6 +211,13 @@ int main(int argc, char** argv) {
     }
 
     if (g_iters < 1) g_iters = 1;
+
+    // Bring up the ic_pfor worker pool and route our internal pfor through it.
+    // worker_count=0 → auto-detect; pass --threads to override.
+    if (threads != 1) {
+        ic::pfor_init(threads > 0 ? threads : 0, true);
+        ic_set_job_system_callbacks(ic::pfor_run);
+    }
 
 #if HAVE_RUST_AV
     // rust-av's ssimulacra2 port is built on Rayon, Rust's work-stealing
