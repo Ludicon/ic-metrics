@@ -392,7 +392,7 @@ static void ToXYB(Image3F& img) {
   const size_t ysize = img.ysize();
 
   #pragma omp parallel for
-  for (size_t y = 0; y < ysize; y ++) {
+  for (isize y = 0; y < (isize)ysize; y ++) {
     float* JXL_RESTRICT row0 = img.PlaneRow(0, y);
     float* JXL_RESTRICT row1 = img.PlaneRow(1, y);
     float* JXL_RESTRICT row2 = img.PlaneRow(2, y);
@@ -744,7 +744,7 @@ static void Downsample(const Image3F &in, size_t fx, size_t fy, Image3F* out) {
   const float normalize = 1.0f / (fx * fy);
   for (size_t c = 0; c < 3; ++c) {
     #pragma omp parallel for
-    for (size_t oy = 0; oy < out_ysize; ++oy) {
+    for (isize oy = 0; oy < (isize)out_ysize; ++oy) {
       float *JXL_RESTRICT row_out = out->PlaneRow(c, oy);
       for (size_t ox = 0; ox < out_xsize; ++ox) {
         float sum = 0.0f;
@@ -784,7 +784,7 @@ static void UpscaleAndAccumulate(const ImageF &in, ImageF &out) {
   const size_t w = out.xsize();
 
   #pragma omp parallel for
-  for (size_t y = 0; y < h; y++) {
+  for (isize y = 0; y < (isize)h; y++) {
     float fy = float(y) * (1.0f / h);
     float* row_out = out.Row(y);
     for (size_t x = 0; x < w; x++) {
@@ -888,7 +888,7 @@ static void SSIMMap(const Image3F &m1, const Image3F &m2, const Image3F &s11,
     const size_t ysize = m1.ysize();
     const size_t xsize = m1.xsize();
     #pragma omp parallel for reduction(+:s_lin, s_quad)
-    for (size_t y = 0; y < ysize; ++y) {
+    for (isize y = 0; y < (isize)ysize; ++y) {
       const float *JXL_RESTRICT row_m1 = m1.PlaneRow(c, y);
       const float *JXL_RESTRICT row_m2 = m2.PlaneRow(c, y);
       const float *JXL_RESTRICT row_s11 = s11.PlaneRow(c, y);
@@ -953,7 +953,7 @@ static void EdgeDiffMap(const Image3F &img1, const Image3F &mu1, const Image3F &
     const size_t ysize = img1.ysize();
     const size_t xsize = img1.xsize();
     #pragma omp parallel for reduction(+:s_art_lin, s_art_quad, s_det_lin, s_det_quad)
-    for (size_t y = 0; y < ysize; ++y) {
+    for (isize y = 0; y < (isize)ysize; ++y) {
       const float *JXL_RESTRICT row1 = img1.PlaneRow(c, y);
       const float *JXL_RESTRICT row2 = img2.PlaneRow(c, y);
       const float *JXL_RESTRICT rowm1 = mu1.PlaneRow(c, y);
@@ -1161,7 +1161,7 @@ static Msssim ComputeSSIMULACRA2(ScratchBuffer& scratch, Image3F& orig, Image3F&
   if (error_map != nullptr) {
     // Remap scalar error values to magma color palette.
     #pragma omp parallel for
-    for (size_t y = 0; y < h; y++) {
+    for (isize y = 0; y < (isize)h; y++) {
       for (size_t x = 0; x < w; x++) {
         float ssim = error_accum.texel(x,y);
 
