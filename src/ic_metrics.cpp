@@ -1749,18 +1749,204 @@ static void ToXYBButteraugli(const Image3F& rgb, ImageF* tmp,
   }
 }
 
+// ----------------------------------------------------------------------------
+// PsychoImage frequency-band decomposition
+// ----------------------------------------------------------------------------
+
+// Tiny helpers — pixel-wise.
+static inline float RemoveRangeAroundZero(float w, float x) {
+  return x > w ? x - w : x < -w ? x + w : 0.0f;
+}
+
+static inline float AmplifyRangeAroundZero(float w, float x) {
+  return x > w ? x + w : x < -w ? x - w : 2.0f * x;
+}
+
+// Single-pixel MaximumClamp (used by the Y channel of hf/uhf).
+static inline float MaximumClamp(float v, float maxval) {
+  static const float kMul = 0.688059627878f;
+  if (v >= maxval) {
+    v -= maxval; v *= kMul; v += maxval;
+  } else if (v < -maxval) {
+    v += maxval; v *= kMul; v -= maxval;
+  }
+  return v;
+}
+
+// Brightness-driven suppression for the Y-channel hf / uhf.
+static inline float SuppressInBrightAreas(float v, float brightness,
+                                                                float mul, float reg) {
+  return mul * reg / (reg + brightness) * v;
+}
+
+// Suppress red-green by intensity change in the high-frequency channels.
+// Writes back into x_inout (= hf X), using y_in (= hf Y) as the modulator.
+static void SuppressXByY(ImageF* x_inout, const ImageF& y_in, double yw) {
+  static const double s = 0.745954517135;
+  const size_t n = x_inout->xsize() * x_inout->ysize();
+  float* x = x_inout->data;
+  const float* y = y_in.data;
+  for (size_t i = 0; i < n; ++i) {
+    const double yval = y[i];
+    const double scaler = s + (yw * (1.0 - s)) / (yw + yval * yval);
+    x[i] = (float)(scaler * x[i]);
+  }
+}
+
+// Final remap of lf XYB into the "vals" space used by the masking stage.
+static inline void XybLowFreqToVals(float x, float y, float b,
+                                                          float* valx, float* valy, float* valb) {
+  static const float xmul = 5.57547552483f;
+  static const float ymul = 1.20828034498f;
+  static const float bmul = 6.08319517575f;
+  static const float y_to_b_mul = -0.628811683685f;
+  const float b_corrected = b + y_to_b_mul * y;
+  *valb = b_corrected * bmul;
+  *valx = x * xmul;
+  *valy = y * ymul;
+}
+
+// PsychoImage: four frequency bands.
+//   lf  : 3 channels (XYB), low-frequency / DC-ish
+//   mf  : 3 channels, mid-frequency band
+//   hf  : 2 channels (X, Y only — B is folded into mf)
+//   uhf : 2 channels (X, Y only)
+// We allocate as full Image3Fs to keep the layout uniform with the rest of
+// the codebase; the unused B planes of hf/uhf are silently ignored.
+struct PsychoImage {
+  Image3F lf;
+  Image3F mf;
+  Image3F hf;
+  Image3F uhf;
+
+  PsychoImage(int w, int h, ScratchBuffer& s)
+    : lf(w, h, s), mf(w, h, s), hf(w, h, s), uhf(w, h, s) {}
+};
+
+// SeparateFrequenciesButteraugli — direct port of upstream SeparateFrequencies.
+// xyb is the OpsinDynamicsImage output. `tmp_xy` and `tmp_blur` are scratch
+// ImageFs (sized H × W for tmp_blur — the transposing-convolution scratch).
+//
+// Sigmas/borders and the remap constants are upstream's verbatim. The
+// "copy mf -> hf, blur INTO mf, then subtract" dance avoids needing a
+// separate in-place blur path.
+static void SeparateFrequenciesButteraugli(const Image3F& xyb,
+                                           ImageF* tmp_blur,
+                                           PsychoImage* ps) {
+  static const float kSigmaLf  = 7.46953768697f;
+  static const float kSigmaHf  = 3.734768843485f;
+  static const float kSigmaUhf = 1.8673844217425f;
+  static const float kBorderLf = -0.00457628248637f;
+  static const float kBorderMf = -0.271277366628f;
+  static const float kBorderHf =  0.147068973249f;
+
+  const size_t xs = xyb.xsize();
+  const size_t ys = xyb.ysize();
+  const size_t n  = xs * ys;
+
+  // lf[i] = Blur(xyb[i], sigma=Lf, border=lf). mf[i] = xyb[i] - lf[i].
+  // For i==2 (B) we then blur mf[2] into itself via the hf-as-scratch trick
+  // and stop (no hf/uhf for B).
+  for (int i = 0; i < 3; ++i) {
+    ButteraugliBlur(xyb.Plane(i), kSigmaLf, kBorderLf, tmp_blur, &ps->lf.Plane(i));
+
+    const float* xyb_p = xyb.Plane(i).data;
+    const float* lf_p  = ps->lf.Plane(i).data;
+    float* mf_p        = ps->mf.Plane(i).data;
+    for (size_t j = 0; j < n; ++j) mf_p[j] = xyb_p[j] - lf_p[j];
+
+    if (i == 2) {
+      // hf serves as the unblurred-mf scratch; we don't actually need hf[2].
+      float* hf_p = ps->hf.Plane(i).data;
+      for (size_t j = 0; j < n; ++j) hf_p[j] = mf_p[j];
+      ButteraugliBlur(ps->hf.Plane(i), kSigmaHf, kBorderMf, tmp_blur, &ps->mf.Plane(i));
+      break;
+    }
+
+    // X/Y: save the unblurred mf into hf, blur from hf into mf, then
+    // hf -= mf, with channel-specific range remap on mf.
+    float* hf_p = ps->hf.Plane(i).data;
+    for (size_t j = 0; j < n; ++j) hf_p[j] = mf_p[j];
+    ButteraugliBlur(ps->hf.Plane(i), kSigmaHf, kBorderMf, tmp_blur, &ps->mf.Plane(i));
+
+    static const float w0 = 0.120079806822f;
+    static const float w1 = 0.03430529365f;
+    if (i == 0) {
+      for (size_t j = 0; j < n; ++j) {
+        hf_p[j] -= mf_p[j];
+        mf_p[j] = RemoveRangeAroundZero(w0, mf_p[j]);
+      }
+    } else {  // i == 1
+      for (size_t j = 0; j < n; ++j) {
+        hf_p[j] -= mf_p[j];
+        mf_p[j] = AmplifyRangeAroundZero(w1, mf_p[j]);
+      }
+    }
+  }
+
+  // Suppress red-green-by-luma in hf X using hf Y.
+  static const double kSuppress = 2.96534974403;
+  SuppressXByY(&ps->hf.Plane(0), ps->hf.Plane(1), kSuppress);
+
+  // hf -> hf + uhf split.
+  for (int i = 0; i < 2; ++i) {
+    float* hf_p  = ps->hf.Plane(i).data;
+    float* uhf_p = ps->uhf.Plane(i).data;
+    for (size_t j = 0; j < n; ++j) uhf_p[j] = hf_p[j];
+
+    ButteraugliBlur(ps->uhf.Plane(i), kSigmaUhf, kBorderHf, tmp_blur, &ps->hf.Plane(i));
+
+    static const float kRemoveHfRange = 0.0287615200377f;
+    static const float kMaxclampHf    = 78.8223237675f;
+    static const float kMaxclampUhf   = 5.8907152736f;
+    static const float kMulSuppressHf = 1.10684769012f;
+    static const float kMulRegHf      = 0.478741530298f;
+    static const float kRegHf         = 2000.0f * kMulRegHf;
+    static const float kMulSuppressUhf = 1.76905001176f;
+    static const float kMulRegUhf      = 0.310148420674f;
+    static const float kRegUhf         = 2000.0f * kMulRegUhf;
+
+    if (i == 0) {
+      for (size_t j = 0; j < n; ++j) {
+        uhf_p[j] -= hf_p[j];
+        hf_p[j] = RemoveRangeAroundZero(kRemoveHfRange, hf_p[j]);
+      }
+    } else {  // i == 1, Y channel: clamp + bright-area suppression
+      const float* lf_y = ps->lf.Plane(1).data;
+      for (size_t j = 0; j < n; ++j) {
+        uhf_p[j] -= hf_p[j];
+        hf_p[j]  = MaximumClamp(hf_p[j],  kMaxclampHf);
+        uhf_p[j] = MaximumClamp(uhf_p[j], kMaxclampUhf);
+        uhf_p[j] = SuppressInBrightAreas(uhf_p[j], lf_y[j], kMulSuppressUhf, kRegUhf);
+        hf_p[j]  = SuppressInBrightAreas(hf_p[j],  lf_y[j], kMulSuppressHf,  kRegHf);
+      }
+    }
+  }
+
+  // Final lf remap (XYB -> "vals" space) so masking stages can do plain L2.
+  float* lf_x = ps->lf.Plane(0).data;
+  float* lf_y = ps->lf.Plane(1).data;
+  float* lf_b = ps->lf.Plane(2).data;
+  for (size_t j = 0; j < n; ++j) {
+    float vx, vy, vb;
+    XybLowFreqToVals(lf_x[j], lf_y[j], lf_b[j], &vx, &vy, &vb);
+    lf_x[j] = vx; lf_y[j] = vy; lf_b[j] = vb;
+  }
+}
+
 }  // namespace (Butteraugli internals)
 
 
 size_t ic_butteraugli_scratch_size(int w, int h) {
-  // Generous upper bound for the WIP pipeline:
+  // WIP upper bound, updated as the pipeline lands:
   //   orig_rgb, dist_rgb           (2 Image3F = 6 wh)
   //   xyb_orig, xyb_dist           (2 Image3F = 6 wh)
-  //   blurred_orig, blurred_dist   (2 Image3F = 6 wh)
+  //   blurred (during ToXYB)       (1 Image3F = 3 wh)  — shared between sides
   //   tmp transposed convolution   (1 ImageF  = 1 wh)
-  // Total 19 wh; round up to 24 to leave headroom for the rest of the
-  // pipeline as it lands. Will be tightened once everything's in.
-  return usize(w) * usize(h) * sizeof(float) * 24;
+  //   psycho_orig: lf+mf+hf+uhf    (4 Image3F = 12 wh)
+  //   psycho_dist: lf+mf+hf+uhf    (4 Image3F = 12 wh)
+  // Total ~40 wh; round to 48 for headroom until masking + diffmap land.
+  return usize(w) * usize(h) * sizeof(float) * 48;
 }
 
 double ic_butteraugli_distance(int w, int h, const unsigned char* orig,
@@ -1798,20 +1984,28 @@ double ic_butteraugli_distance(int w, int h, const unsigned char* orig,
     }
   }
 
-  ImageF tmp(h, w, scratch);
-  Image3F blurred_orig(w, h, scratch);
-  Image3F blurred_dist(w, h, scratch);
+  ImageF tmp(h, w, scratch);                  // transposed-convolution scratch
+  Image3F blurred(w, h, scratch);              // ToXYB's intermediate (shared)
   Image3F xyb_orig(w, h, scratch);
   Image3F xyb_dist(w, h, scratch);
 
-  ToXYBButteraugli(orig_rgb, &tmp, &blurred_orig, &xyb_orig);
-  ToXYBButteraugli(dist_rgb, &tmp, &blurred_dist, &xyb_dist);
+  ToXYBButteraugli(orig_rgb, &tmp, &blurred, &xyb_orig);
+  ToXYBButteraugli(dist_rgb, &tmp, &blurred, &xyb_dist);
 
-  // Placeholder distance: RMSE across the three XYB channels.
+  // Frequency-band decomposition for each side. ps0 / ps1 are the two
+  // PsychoImages the next stages (masking, Malta, diffmap) will consume.
+  PsychoImage ps0(w, h, scratch);
+  PsychoImage ps1(w, h, scratch);
+  SeparateFrequenciesButteraugli(xyb_orig, &tmp, &ps0);
+  SeparateFrequenciesButteraugli(xyb_dist, &tmp, &ps1);
+
+  // Placeholder distance: RMSE over the lf bands (now in 'vals' space).
+  // This will be replaced by Malta + Mask + max-pool. Sanity numbers:
+  // identical -> 0; differing -> grows; uncorrelated -> larger still.
   double sse = 0.0;
   for (int c = 0; c < 3; ++c) {
-    const float* a = xyb_orig.PlaneRow(c, 0);
-    const float* b = xyb_dist.PlaneRow(c, 0);
+    const float* a = ps0.lf.Plane(c).data;
+    const float* b = ps1.lf.Plane(c).data;
     for (size_t i = 0; i < n; i++) {
       const double d = (double)a[i] - (double)b[i];
       sse += d * d;
