@@ -15,9 +15,10 @@
 
 #include "harness.h"
 
-#include <glob.h>
+#include <filesystem>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string>
 #include <string.h>
 
 
@@ -86,21 +87,22 @@ void harness_free_distortion(u8* p) {
 // Glob *.png
 
 int harness_for_each_png(const char* data_dir, HarnessPathCallback cb, void* ctx) {
-    char pattern[1024];
-    snprintf(pattern, sizeof(pattern), "%s/*.png", data_dir);
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::is_directory(data_dir, ec)) return -1;
 
-    glob_t g;
-    if (glob(pattern, 0, nullptr, &g) != 0) {
-        return -1;
-    }
-    defer { globfree(&g); };
-
-    if (cb) {
-        for (size_t i = 0; i < g.gl_pathc; i++) {
-            cb(g.gl_pathv[i], ctx);
+    int count = 0;
+    for (const auto& entry : fs::directory_iterator(data_dir, ec)) {
+        if (ec) return -1;
+        if (entry.path().extension() == ".png") {
+            count++;
+            if (cb) {
+                std::string s = entry.path().string();
+                cb(s.c_str(), ctx);
+            }
         }
     }
-    return (int)g.gl_pathc;
+    return count;
 }
 
 

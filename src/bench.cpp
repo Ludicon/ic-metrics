@@ -215,7 +215,11 @@ int main(int argc, char** argv) {
     if (threads > 0) {
         char buf[32];
         snprintf(buf, sizeof(buf), "%d", threads);
+#ifdef _WIN32
+        _putenv_s("RAYON_NUM_THREADS", buf);
+#else
         setenv("RAYON_NUM_THREADS", buf, 1);
+#endif
     }
 
     if (harness_for_each_png(data_dir, nullptr, nullptr) < 0) {

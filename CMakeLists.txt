@@ -18,7 +18,11 @@ endif()
 # Enable AVX2 + FMA on x86_64 builds for the f32x8 SIMD path in ic_metrics.
 # On arm64 the helpers use NEON (always available on aarch64).
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
-    add_compile_options(-mavx2 -mfma)
+    if(MSVC)
+        add_compile_options(/arch:AVX2)
+    else()
+        add_compile_options(-mavx2 -mfma)
+    endif()
 endif()
 
 
