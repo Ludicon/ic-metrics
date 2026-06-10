@@ -9,7 +9,7 @@ This code is based on [Cloudinary's SSIMULACRA2](https://github.com/cloudinary/s
 - build as a **single compilation unit** (one `.cpp` + one `.h`),
 - contain **no dependencies outside the C standard library** + compiler's SIMD intrinsics,
 - do **zero internal heap allocations** (caller passes a scratch buffer),
-- also provide a standard **SSIM** (Wang et al., 2004) implementation.
+- also provide **SSIM** and **MS-SSIM** implementations.
 
 More metrics are planned.
 
