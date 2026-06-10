@@ -1369,3 +1369,202 @@ double ic_ssim_score(int w, int h, const unsigned char* orig, const unsigned cha
 
   return ssim_sum * one_per_pixels;
 }
+
+
+// MS-SSIM (Multi-Scale SSIM), Wang/Simoncelli/Bovik 2003. Same Gaussian,
+// C1/C2 and Rec.601-luma input as ic_ssim_score — at scale 0, MS-SSIM and
+// SSIM use the same per-pixel formula.
+//
+// At each scale j we compute pixel-wise SSIM = l·cs and CS, take their mean
+// over the image, then downsample (2×2 box average) for the next scale.
+// Combination follows the paper:
+//   MS-SSIM = mean_SSIM_M ^ w_M  *  prod_{j<M} mean_CS_j ^ w_j
+// with weights {0.0448, 0.2856, 0.3001, 0.2363, 0.1333} and M = 5. We
+// compute in log space and divide by the sum of *used* weights so the
+// score still makes sense when small images can't reach all 5 scales.
+
+// 2×2 box-average downsample for a single plane. In-place safe in
+// row-major order — output stride < input stride so writes always lag reads.
+static void DownsampleAvg2(const ImageF& in, ImageF* out) {
+  const size_t out_w = out->xsize();
+  const size_t out_h = out->ysize();
+  JXL_CHECK(out_w == (in.xsize() + 1) / 2);
+  JXL_CHECK(out_h == (in.ysize() + 1) / 2);
+  const float norm = 0.25f;
+  const size_t in_w = in.xsize();
+  const size_t in_h = in.ysize();
+  for (size_t oy = 0; oy < out_h; ++oy) {
+    const size_t iy0 = oy * 2;
+    const size_t iy1 = (iy0 + 1 < in_h) ? iy0 + 1 : iy0;     // odd-height fold
+    const float* row_in0 = in.Row(iy0);
+    const float* row_in1 = in.Row(iy1);
+    float* row_out = out->Row(oy);
+    for (size_t ox = 0; ox < out_w; ++ox) {
+      const size_t ix0 = ox * 2;
+      const size_t ix1 = (ix0 + 1 < in_w) ? ix0 + 1 : ix0;   // odd-width fold
+      row_out[ox] = (row_in0[ix0] + row_in0[ix1] + row_in1[ix0] + row_in1[ix1]) * norm;
+    }
+  }
+}
+
+size_t ic_msssim_score_scratch_size(int w, int h) {
+  // Identical layout to ic_ssim_score: img1, img2, mu1, mu2, tmp,
+  // sigma1_sq, sigma2_sq, sigma12, blur.temp — 9 ImageF at the largest
+  // scale. Coarser scales reuse the same buffers via ShrinkTo.
+  return usize(w) * usize(h) * sizeof(float) * 9;
+}
+
+double ic_msssim_score(int w, int h, const unsigned char* orig, const unsigned char* dist, void* scratch_ptr, unsigned char* error_map) {
+  JXL_PROFILE_FUNC
+
+  ScratchBuffer scratch = { scratch_ptr, ic_msssim_score_scratch_size(w, h), 0 };
+
+  // Same constants as SSIM (Wang 2004) for the [0,1] luma range.
+  static const float kC1 = 0.0001f;
+  static const float kC2 = 0.0009f;
+
+  // Wang/Simoncelli/Bovik 2003 default scale weights. Sum to 1.0.
+  static const double kWeights[5] = { 0.0448, 0.2856, 0.3001, 0.2363, 0.1333 };
+  static constexpr int kScales = 5;
+
+  ImageF img1(w, h, scratch);
+  ImageF img2(w, h, scratch);
+
+  // RGBA8 → Rec.601 luma in [0,1]. Same path as ic_ssim_score.
+  constexpr float kR = 0.299f / 255.0f;
+  constexpr float kG = 0.587f / 255.0f;
+  constexpr float kB = 0.114f / 255.0f;
+  for (int y = 0; y < h; y++) {
+    float* row1 = img1.Row(y);
+    float* row2 = img2.Row(y);
+    const unsigned char* p1 = orig + y * w * 4;
+    const unsigned char* p2 = dist + y * w * 4;
+    for (int x = 0; x < w; x++) {
+      row1[x] = kR * p1[4*x + 0] + kG * p1[4*x + 1] + kB * p1[4*x + 2];
+      row2[x] = kR * p2[4*x + 0] + kG * p2[4*x + 1] + kB * p2[4*x + 2];
+    }
+  }
+
+  Blur blur(w, h, scratch);
+  ImageF mu1(w, h, scratch);
+  ImageF mu2(w, h, scratch);
+  ImageF tmp(w, h, scratch);
+  ImageF sigma1_sq(w, h, scratch);
+  ImageF sigma2_sq(w, h, scratch);
+  ImageF sigma12(w, h, scratch);
+
+  double log_msssim = 0.0;
+  double weights_used = 0.0;
+
+  for (int j = 0; j < kScales; j++) {
+    const size_t sx = img1.xsize();
+    const size_t sy = img1.ysize();
+    if (sx < 8 || sy < 8) break;
+
+    blur     .ShrinkTo(sx, sy);
+    mu1      .ShrinkTo(sx, sy);
+    mu2      .ShrinkTo(sx, sy);
+    tmp      .ShrinkTo(sx, sy);
+    sigma1_sq.ShrinkTo(sx, sy);
+    sigma2_sq.ShrinkTo(sx, sy);
+    sigma12  .ShrinkTo(sx, sy);
+
+    blur(img1, &mu1);
+    blur(img2, &mu2);
+
+    // sigma1_sq = blur(img1²)   (the mu1² subtraction is folded into the per-pixel formula)
+    for (size_t y = 0; y < sy; y++) {
+      const float* r1 = img1.Row(y);
+      float* rt = tmp.Row(y);
+      for (size_t x = 0; x < sx; x++) rt[x] = r1[x] * r1[x];
+    }
+    blur(tmp, &sigma1_sq);
+
+    for (size_t y = 0; y < sy; y++) {
+      const float* r2 = img2.Row(y);
+      float* rt = tmp.Row(y);
+      for (size_t x = 0; x < sx; x++) rt[x] = r2[x] * r2[x];
+    }
+    blur(tmp, &sigma2_sq);
+
+    for (size_t y = 0; y < sy; y++) {
+      const float* r1 = img1.Row(y);
+      const float* r2 = img2.Row(y);
+      float* rt = tmp.Row(y);
+      for (size_t x = 0; x < sx; x++) rt[x] = r1[x] * r2[x];
+    }
+    blur(tmp, &sigma12);
+
+    // Mean SSIM (= l·cs) and mean CS over pixels. The cs/l split here uses
+    // C3 = C2/2 so that l·cs simplifies to (2σxy+C2)/(σx²+σy²+C2) · l —
+    // saves one division per pixel.
+    double ssim_sum = 0.0;
+    double cs_sum = 0.0;
+    const double one_per_pixels = 1.0 / (double(sx) * double(sy));
+    const bool fill_err = (error_map != nullptr) && (j == 0);
+
+    for (size_t y = 0; y < sy; y++) {
+      const float* rm1  = mu1.Row(y);
+      const float* rm2  = mu2.Row(y);
+      const float* rs11 = sigma1_sq.Row(y);
+      const float* rs22 = sigma2_sq.Row(y);
+      const float* rs12 = sigma12.Row(y);
+      for (size_t x = 0; x < sx; x++) {
+        float m1 = rm1[x];
+        float m2 = rm2[x];
+        float m1m2 = m1 * m2;
+        float m1sq = m1 * m1;
+        float m2sq = m2 * m2;
+        float s1sq = rs11[x] - m1sq;
+        float s2sq = rs22[x] - m2sq;
+        float s12  = rs12[x] - m1m2;
+
+        float l_num  = 2.0f * m1m2 + kC1;
+        float l_den  = m1sq + m2sq + kC1;
+        float cs_num = 2.0f * s12  + kC2;
+        float cs_den = s1sq + s2sq + kC2;
+
+        float cs   = cs_num / cs_den;
+        float ssim = (l_num / l_den) * cs;
+
+        ssim_sum += ssim;
+        cs_sum   += cs;
+
+        if (fill_err) {
+          float err = 1.0f - ssim;
+          if (err < 0.0f) err = 0.0f;
+          if (err > 1.0f) err = 1.0f;
+          int value = int(255 * err);
+          ((uint32_t*)error_map)[y * sx + x] = MagmaMap[value];
+        }
+      }
+    }
+
+    const double ssim_mean = ssim_sum * one_per_pixels;
+    const double cs_mean   = cs_sum   * one_per_pixels;
+
+    // Coarsest scale we'll actually run contributes l·cs; finer scales
+    // contribute CS only. Detect "is this the last scale we'll run" by
+    // checking whether the next scale would be too small.
+    const bool is_last_scale = (j == kScales - 1) || (sx / 2 < 8 || sy / 2 < 8);
+    double contribution = is_last_scale ? ssim_mean : cs_mean;
+    if (contribution < 1e-10) contribution = 1e-10;  // guard the log
+    log_msssim += kWeights[j] * log(contribution);
+    weights_used += kWeights[j];
+
+    if (is_last_scale) break;
+
+    // Downsample img1, img2 for the next scale (in-place safe).
+    const ImageF src1 = img1;
+    const ImageF src2 = img2;
+    const size_t next_sx = (sx + 1) / 2;
+    const size_t next_sy = (sy + 1) / 2;
+    img1.ShrinkTo(next_sx, next_sy);
+    img2.ShrinkTo(next_sx, next_sy);
+    DownsampleAvg2(src1, &img1);
+    DownsampleAvg2(src2, &img2);
+  }
+
+  if (weights_used <= 0.0) return 0.0;
+  return exp(log_msssim / weights_used);
+}

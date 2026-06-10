@@ -25,3 +25,11 @@ size_t ic_ssim_score_scratch_size(int w, int h);
 double ic_ssim_score(int w, int h, const unsigned char *orig,
                      const unsigned char *dist, void *scratch_ptr,
                      unsigned char *error_map = nullptr);
+
+// MS-SSIM (Multi-Scale SSIM) — Wang/Simoncelli/Bovik 2003. Same RGBA8 input
+// and scratch-buffer pattern as ic_ssim_score. Score is in [0, 1] (1 means
+// identical). The optional error_map is filled at the finest scale.
+size_t ic_msssim_score_scratch_size(int w, int h);
+double ic_msssim_score(int w, int h, const unsigned char *orig,
+                       const unsigned char *dist, void *scratch_ptr,
+                       unsigned char *error_map = nullptr);
