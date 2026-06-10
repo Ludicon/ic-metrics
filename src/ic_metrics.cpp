@@ -27,7 +27,6 @@ Design:
 
 #include <stddef.h> // size_t
 #include <string.h> // memcpy
-#include <stdio.h> // printf
 #include <math.h>
 
 #if __has_include("ic_shared.h")
@@ -1157,32 +1156,14 @@ double Msssim::Score() const {
   double ssim = 0.0;
 
   size_t i = 0;
-  char ch[] = "XYB";
-  const bool verbose = false;
-  if (verbose) printf("\n");
   for (size_t c = 0; c < 3; ++c) {
     for (size_t scale = 0; scale < kNumScales; ++scale) {
       for (size_t n = 0; n < 2; n++) {
-        if (verbose) {
-          printf("%f from channel %c ssim, scale 1:%i, %zu-norm (weight %f)\n",
-                 weight[i] * abs(scales[scale].avg_ssim[c * 2 + n]), ch[c], 1 << scale, n * 3 + 1, weight[i]);
-        }
         ssim += weight[i++] * abs(scales[scale].avg_ssim[c * 2 + n]);
-        if (verbose) {
-          printf("%f from channel %c ringing, scale 1:%i, %zu-norm (weight %f)\n",
-              weight[i] * abs(scales[scale].avg_edgediff[c * 4 + n]), ch[c], 1 << scale, n * 3 + 1, weight[i]);
-        }
         ssim += weight[i++] * abs(scales[scale].avg_edgediff[c * 4 + n]);
-        if (verbose) {
-          printf("%f from channel %c blur, scale 1:%i, %zu-norm (weight %f)\n",
-                 weight[i] * abs(scales[scale].avg_edgediff[c * 4 + n + 2]), ch[c], 1 << scale, n * 3 + 1, weight[i]);
-        }
         ssim += weight[i++] * abs(scales[scale].avg_edgediff[c * 4 + n + 2]);
       }
     }
-  }
-  if (verbose) {
-      printf("raw ssim: %f\n", ssim);
   }
 
   ssim = ssim * 0.9562382616834844;
