@@ -40,6 +40,17 @@ Design:
     #else
       #define ic_unlikely(x)   (x)
     #endif
+    template <typename T> inline T max(const T & a, const T & b) {
+      return (b < a) ? a : b;
+    }
+
+    template <typename T> inline T min(const T & a, const T & b) {
+      return (a < b) ? a : b;
+    }
+
+    template <typename T> inline T clamp(const T & x, const T & lo, const T & hi) {
+      return max(min(x, hi), lo);
+    }
   #else
     #define ic_debug_break() __builtin_debugtrap()
     #define ic_unlikely(x)   (__builtin_expect((x), 0))
@@ -121,23 +132,12 @@ struct Msssim {
   double Score() const;
 };
 
-template <typename T> inline constexpr T max(const T & a, const T & b) {
-  return (b < a) ? a : b;
-}
 
-template <typename T> inline constexpr T min(const T & a, const T & b) {
-  return (a < b) ? a : b;
-}
-
-template <typename T> inline constexpr T clamp(const T & x, const T & lo, const T & hi) {
-  return max(min(x, hi), lo);
-}
-
-template <typename T> inline constexpr T abs(T f) {
+template <typename T> inline T abs(T f) {
   return f < 0 ? -f : f;
 }
 
-template <typename T> inline constexpr T lerp(T a, T b, T t) {
+template <typename T> inline T lerp(T a, T b, T t) {
     //return a + t * (b - a);
     return a * (1 - t) + b * t;
 }
