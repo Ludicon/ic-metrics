@@ -592,7 +592,7 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
   // With just JXL_RESTRICT the compiler was reloading kernel[r+i] every
   // iteration — measured ~5% slower. R constexpr lets the i loops unroll.
   // Used by all three sections (border, NEON interior, scalar interior).
-  constexpr int R = kBlurRadius;
+  static constexpr int R = kBlurRadius;
   float kloc[R + 1];
   for (int i = 0; i <= R; ++i) kloc[i] = kernel[R + i];
 
@@ -677,7 +677,7 @@ static void ConvolveVertical(const ImageF& in, ImageF* JXL_RESTRICT out, const f
   const int mode = var::ssimu2_blur_wrap_mode;
 
   // See ConvolveHorizontal for rationale.
-  constexpr int R = kBlurRadius;
+  static constexpr int R = kBlurRadius;
   float kloc[R + 1];
   for (int i = 0; i <= R; ++i) kloc[i] = kernel[R + i];
 
