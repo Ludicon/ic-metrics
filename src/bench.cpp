@@ -220,7 +220,7 @@ int main(int argc, char** argv) {
     if (threads > 0) {
         char buf[32];
         snprintf(buf, sizeof(buf), "%d", threads);
-#ifdef _WIN32
+#if IC_OS_WINDOWS
         _putenv_s("RAYON_NUM_THREADS", buf);
 #else
         setenv("RAYON_NUM_THREADS", buf, 1);

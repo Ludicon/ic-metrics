@@ -14,8 +14,9 @@
 #include "stb_image_write.h"
 
 #include "harness.h"
+#include "ic_shared.h"  // IC_OS_WINDOWS
 
-#ifdef _WIN32
+#if IC_OS_WINDOWS
     #define WIN32_LEAN_AND_MEAN
     #include <windows.h>
 #else
@@ -91,7 +92,7 @@ void harness_free_distortion(u8* p) {
 // Glob *.png
 
 int harness_for_each_png(const char* data_dir, HarnessPathCallback cb, void* ctx) {
-#ifdef _WIN32
+#if IC_OS_WINDOWS
     // Windows has no glob(3); use FindFirstFile/FindNextFile. Same shape:
     // build a "<dir>\*.png" wildcard, enumerate, build absolute paths on
     // the fly. Excludes "." and ".." (FindFirstFile doesn't return them
