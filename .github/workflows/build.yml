@@ -22,9 +22,13 @@ jobs:
       # lfs: false (also the default) — skip downloading LFS objects.
       # They aren't needed to build and downloads count against the org
       # bandwidth quota.
+      # submodules: recursive — the third-party impl bridges under
+      # extern/ have path dependencies on submodules (rust_av_bridge ->
+      # rust_av_ssimulacra2, cloudinary_impl -> cloudinary_ssimulacra2).
       - uses: actions/checkout@v4
         with:
           lfs: false
+          submodules: recursive
 
       # OpenMP runtime — Linux gcc and Windows MSVC ship it inline.
       # Apple clang does not, so install brew libomp for the omp-experiment

@@ -141,7 +141,14 @@ char(*__countof_helper(T(&_Array)[N]))[N];
         #define ic_unlikely(x)   (x)
     #endif
 #else
-    #define ic_debug_break() __builtin_debugtrap()
+    // __builtin_debugtrap exists on clang/apple-clang but not on gcc.
+    // gcc has __builtin_trap (SIGILL) — less debugger-friendly but works
+    // everywhere we care about.
+    #if defined(__has_builtin) && __has_builtin(__builtin_debugtrap)
+        #define ic_debug_break() __builtin_debugtrap()
+    #else
+        #define ic_debug_break() __builtin_trap()
+    #endif
     #define ic_unlikely(x)   (__builtin_expect((x), 0))
 #endif
 
