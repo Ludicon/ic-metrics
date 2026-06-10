@@ -1024,8 +1024,10 @@ static Msssim ComputeSSIMULACRA2(ScratchBuffer& scratch, Image3F& orig, Image3F&
   // linear_* in-place to XYB (so it now holds XYB at scale s+1), and swap
   // the pointers. ds_orig/ds_dist are sized for scale 1; orig/dist
   // (full-size buffers) hold subsequent shrunk-down scales.
-  Image3F ds_orig(w / 2, h / 2, scratch);
-  Image3F ds_dist(w / 2, h / 2, scratch);
+  // Ceil division so odd dimensions keep their last row/column, matching
+  // Downsample()'s size invariant.
+  Image3F ds_orig((w + 1) / 2, (h + 1) / 2, scratch);
+  Image3F ds_dist((w + 1) / 2, (h + 1) / 2, scratch);
 
   Downsample(orig, 2, 2, &ds_orig);
   Downsample(dist, 2, 2, &ds_dist);
@@ -1087,8 +1089,8 @@ static Msssim ComputeSSIMULACRA2(ScratchBuffer& scratch, Image3F& orig, Image3F&
     // Downsample it into xyb_*'s now-free buffer (linear at scale+2),
     // then in-place ToXYB linear_* (so it holds XYB at scale+1), then
     // swap so the next iteration sees XYB in xyb_* and linear in linear_*.
-    const size_t next_xs = linear_orig->xsize() / 2;
-    const size_t next_ys = linear_orig->ysize() / 2;
+    const size_t next_xs = (linear_orig->xsize() + 1) / 2;
+    const size_t next_ys = (linear_orig->ysize() + 1) / 2;
     if (scale + 1 < kNumScales && next_xs >= 8 && next_ys >= 8) {
       xyb_orig->ShrinkTo(next_xs, next_ys);
       xyb_dist->ShrinkTo(next_xs, next_ys);
