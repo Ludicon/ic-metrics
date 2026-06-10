@@ -1934,6 +1934,88 @@ static void SeparateFrequenciesButteraugli(const Image3F& xyb,
   }
 }
 
+// ----------------------------------------------------------------------------
+// Diffmap construction
+// ----------------------------------------------------------------------------
+
+// Per-pixel L2 — accumulates `w * (a-b)^2` into diffmap. Caller zero-inits.
+static void L2Diff(const ImageF& a, const ImageF& b, double w, ImageF* diff) {
+  if (w == 0.0) return;
+  const size_t n = a.xsize() * a.ysize();
+  const float* ap = a.data;
+  const float* bp = b.data;
+  float* dp = diff->data;
+  const float wf = (float)w;
+  for (size_t i = 0; i < n; ++i) {
+    const float d = ap[i] - bp[i];
+    dp[i] += wf * d * d;
+  }
+}
+
+// Asymmetric L2: primary symmetric quadratic plus a half-open quadratic
+// penalty when the distorted pixel moves "across" zero relative to the
+// original, or stretches past 1.0x the original magnitude. Used for hf.
+static void L2DiffAsymmetric(const ImageF& a, const ImageF& b,
+                             double w_0gt1, double w_0lt1, ImageF* diff) {
+  if (w_0gt1 == 0.0 && w_0lt1 == 0.0) return;
+  w_0gt1 *= 0.8;
+  w_0lt1 *= 0.8;
+  const size_t n = a.xsize() * a.ysize();
+  const float* ap = a.data;
+  const float* bp = b.data;
+  float* dp = diff->data;
+  for (size_t i = 0; i < n; ++i) {
+    const double d = ap[i] - bp[i];
+    dp[i] += (float)(w_0gt1 * d * d);
+
+    const double fabs0 = fabs(ap[i]);
+    const double too_small = 0.4 * fabs0;
+    const double too_big   = 1.0 * fabs0;
+
+    if (ap[i] < 0) {
+      if (bp[i] > -too_small) {
+        const double v = bp[i] + too_small;
+        dp[i] += (float)(w_0lt1 * v * v);
+      } else if (bp[i] < -too_big) {
+        const double v = -bp[i] - too_big;
+        dp[i] += (float)(w_0lt1 * v * v);
+      }
+    } else {
+      if (bp[i] < too_small) {
+        const double v = too_small - bp[i];
+        dp[i] += (float)(w_0lt1 * v * v);
+      } else if (bp[i] > too_big) {
+        const double v = bp[i] - too_big;
+        dp[i] += (float)(w_0lt1 * v * v);
+      }
+    }
+  }
+}
+
+// sqrt with a floor for very small values (avoids the sqrt being too
+// steep near zero — upstream uses kInitialSlope = 100 so that values
+// below 1/100^2 = 1e-4 are linearly remapped at slope 100 instead).
+static void CalculateDiffmap(const ImageF& in, ImageF* out) {
+  static const float kInitialSlope = 100.0f;
+  static const float kThresh = 1.0f / (kInitialSlope * kInitialSlope);
+  const size_t n = in.xsize() * in.ysize();
+  const float* ip = in.data;
+  float* op = out->data;
+  for (size_t i = 0; i < n; ++i) {
+    const float v = ip[i];
+    op[i] = (v < kThresh) ? kInitialSlope * v : sqrtf(v);
+  }
+}
+
+// Final aggregation: max over the diffmap.
+static double ButteraugliScoreFromDiffmap(const ImageF& diffmap) {
+  const size_t n = diffmap.xsize() * diffmap.ysize();
+  const float* p = diffmap.data;
+  float m = 0.0f;
+  for (size_t i = 0; i < n; ++i) if (p[i] > m) m = p[i];
+  return (double)m;
+}
+
 }  // namespace (Butteraugli internals)
 
 
@@ -1946,7 +2028,7 @@ size_t ic_butteraugli_scratch_size(int w, int h) {
   //   psycho_orig: lf+mf+hf+uhf    (4 Image3F = 12 wh)
   //   psycho_dist: lf+mf+hf+uhf    (4 Image3F = 12 wh)
   // Total ~40 wh; round to 48 for headroom until masking + diffmap land.
-  return usize(w) * usize(h) * sizeof(float) * 48;
+  return usize(w) * usize(h) * sizeof(float) * 60;
 }
 
 double ic_butteraugli_distance(int w, int h, const unsigned char* orig,
@@ -1992,24 +2074,74 @@ double ic_butteraugli_distance(int w, int h, const unsigned char* orig,
   ToXYBButteraugli(orig_rgb, &tmp, &blurred, &xyb_orig);
   ToXYBButteraugli(dist_rgb, &tmp, &blurred, &xyb_dist);
 
-  // Frequency-band decomposition for each side. ps0 / ps1 are the two
-  // PsychoImages the next stages (masking, Malta, diffmap) will consume.
   PsychoImage ps0(w, h, scratch);
   PsychoImage ps1(w, h, scratch);
   SeparateFrequenciesButteraugli(xyb_orig, &tmp, &ps0);
   SeparateFrequenciesButteraugli(xyb_dist, &tmp, &ps1);
 
-  // Placeholder distance: RMSE over the lf bands (now in 'vals' space).
-  // This will be replaced by Malta + Mask + max-pool. Sanity numbers:
-  // identical -> 0; differing -> grows; uncorrelated -> larger still.
-  double sse = 0.0;
+  // Diffmap construction. block_diff_ac (3 ch) and block_diff_dc (3 ch)
+  // accumulate per-pixel quadratic terms; the masking + combine step
+  // turns them into the diffmap. With identity masks we just sum.
+  //
+  // Note: most wmul entries are 0 upstream — what really makes the score
+  // is the Malta passes (added in the next commit). Until then this is
+  // L2/L2Asymm only, so magnitudes will undershoot upstream but the
+  // shape (zero for identical, positive otherwise) holds.
+  Image3F block_diff_ac(w, h, scratch);
+  Image3F block_diff_dc(w, h, scratch);
   for (int c = 0; c < 3; ++c) {
-    const float* a = ps0.lf.Plane(c).data;
-    const float* b = ps1.lf.Plane(c).data;
-    for (size_t i = 0; i < n; i++) {
-      const double d = (double)a[i] - (double)b[i];
-      sse += d * d;
+    block_diff_ac.Plane(c).Clear();
+    block_diff_dc.Plane(c).Clear();
+  }
+
+  // wmul layout: [hf_X, hf_Y, hf_B, mf_X, mf_Y, mf_B, lf_X, lf_Y, lf_B]
+  // — verbatim from DiffmapPsychoImage upstream.
+  static const double wmul[9] = {
+    0.0, 32.4449876135, 0.0,
+    0.0, 0.0,           0.0,
+    1.01370836411, 0.0, 1.74566011615,
+  };
+  const double hf_asymmetry = 1.0;
+
+  for (int c = 0; c < 3; ++c) {
+    if (c < 2) {
+      L2DiffAsymmetric(ps0.hf.Plane(c), ps1.hf.Plane(c),
+                       wmul[c] * hf_asymmetry,
+                       wmul[c] / hf_asymmetry,
+                       &block_diff_ac.Plane(c));
+    }
+    L2Diff(ps0.mf.Plane(c), ps1.mf.Plane(c), wmul[3 + c], &block_diff_ac.Plane(c));
+    L2Diff(ps0.lf.Plane(c), ps1.lf.Plane(c), wmul[6 + c], &block_diff_dc.Plane(c));
+  }
+
+  // Identity-mask combine: per-pixel sum of all six channels. The real
+  // CombineChannels multiplies each channel by its mask before summing;
+  // that lands when Mask is ported.
+  ImageF diff_pre(w, h, scratch);
+  {
+    float* dp = diff_pre.data;
+    for (size_t i = 0; i < n; ++i) dp[i] = 0.0f;
+    for (int c = 0; c < 3; ++c) {
+      const float* ac = block_diff_ac.Plane(c).data;
+      const float* dc = block_diff_dc.Plane(c).data;
+      for (size_t i = 0; i < n; ++i) dp[i] += ac[i] + dc[i];
     }
   }
-  return sqrt(sse / double(3 * n));
+
+  ImageF diffmap(w, h, scratch);
+  CalculateDiffmap(diff_pre, &diffmap);
+
+  // Optional error map — magma-mapped per-pixel distance.
+  if (error_map) {
+    const float* dp = diffmap.data;
+    uint32_t* eo = (uint32_t*)error_map;
+    for (size_t i = 0; i < n; ++i) {
+      float v = dp[i];
+      if (v < 0.0f) v = 0.0f;
+      if (v > 1.0f) v = 1.0f;
+      eo[i] = MagmaMap[(int)(255.0f * v)];
+    }
+  }
+
+  return ButteraugliScoreFromDiffmap(diffmap);
 }
