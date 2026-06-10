@@ -1281,14 +1281,15 @@ double ic_ssim_score(int w, int h, const unsigned char* orig, const unsigned cha
   constexpr float kR = 0.299f / 255.0f;
   constexpr float kG = 0.587f / 255.0f;
   constexpr float kB = 0.114f / 255.0f;
-  for (int y = 0; y < h; y++) {
-    float* row1 = img1.Row(y);
-    float* row2 = img2.Row(y);
-    const unsigned char* p1 = orig + y * w * 4;
-    const unsigned char* p2 = dist + y * w * 4;
-    for (int x = 0; x < w; x++) {
-      row1[x] = kR * p1[4*x + 0] + kG * p1[4*x + 1] + kB * p1[4*x + 2];
-      row2[x] = kR * p2[4*x + 0] + kG * p2[4*x + 1] + kB * p2[4*x + 2];
+
+  const size_t n = size_t(w) * size_t(h);
+
+  {
+    float* row1 = img1.data;
+    float* row2 = img2.data;
+    for (size_t i = 0; i < n; i++) {
+      row1[i] = kR * orig[4*i + 0] + kG * orig[4*i + 1] + kB * orig[4*i + 2];
+      row2[i] = kR * dist[4*i + 0] + kG * dist[4*i + 1] + kB * dist[4*i + 2];
     }
   }
 
@@ -1308,62 +1309,51 @@ double ic_ssim_score(int w, int h, const unsigned char* orig, const unsigned cha
   ImageF sigma2_sq(w, h, scratch);
   ImageF sigma12(w, h, scratch);
 
-  for (int y = 0; y < h; y++) {
-    const float* r1 = img1.Row(y);
-    float* rt = tmp.Row(y);
-    for (int x = 0; x < w; x++) rt[x] = r1[x] * r1[x];
+  {
+    const float* p1 = img1.data;
+    const float* p2 = img2.data;
+    float* pt = tmp.data;
+    for (size_t i = 0; i < n; i++) pt[i] = p1[i] * p1[i];
+    blur(tmp, &sigma1_sq);
+    for (size_t i = 0; i < n; i++) pt[i] = p2[i] * p2[i];
+    blur(tmp, &sigma2_sq);
+    for (size_t i = 0; i < n; i++) pt[i] = p1[i] * p2[i];
+    blur(tmp, &sigma12);
   }
-  blur(tmp, &sigma1_sq);
-
-  for (int y = 0; y < h; y++) {
-    const float* r2 = img2.Row(y);
-    float* rt = tmp.Row(y);
-    for (int x = 0; x < w; x++) rt[x] = r2[x] * r2[x];
-  }
-  blur(tmp, &sigma2_sq);
-
-  for (int y = 0; y < h; y++) {
-    const float* r1 = img1.Row(y);
-    const float* r2 = img2.Row(y);
-    float* rt = tmp.Row(y);
-    for (int x = 0; x < w; x++) rt[x] = r1[x] * r2[x];
-  }
-  blur(tmp, &sigma12);
 
   // Compute SSIM map and accumulate mean.
   double ssim_sum = 0.0;
-  const double one_per_pixels = 1.0 / (w * h);
+  const double one_per_pixels = 1.0 / double(n);
+  const float* pm1 = mu1.data;
+  const float* pm2 = mu2.data;
+  const float* ps11 = sigma1_sq.data;
+  const float* ps22 = sigma2_sq.data;
+  const float* ps12 = sigma12.data;
+  uint32_t* err_out = (uint32_t*)error_map;
 
-  for (int y = 0; y < h; y++) {
-    const float* rm1 = mu1.Row(y);
-    const float* rm2 = mu2.Row(y);
-    const float* rs11 = sigma1_sq.Row(y);
-    const float* rs22 = sigma2_sq.Row(y);
-    const float* rs12 = sigma12.Row(y);
-    for (int x = 0; x < w; x++) {
-      float m1 = rm1[x];
-      float m2 = rm2[x];
-      float m1m2 = m1 * m2;
-      float m1sq = m1 * m1;
-      float m2sq = m2 * m2;
-      float s1sq = rs11[x] - m1sq;
-      float s2sq = rs22[x] - m2sq;
-      float s12  = rs12[x] - m1m2;
+  for (size_t i = 0; i < n; i++) {
+    float m1 = pm1[i];
+    float m2 = pm2[i];
+    float m1m2 = m1 * m2;
+    float m1sq = m1 * m1;
+    float m2sq = m2 * m2;
+    float s1sq = ps11[i] - m1sq;
+    float s2sq = ps22[i] - m2sq;
+    float s12  = ps12[i] - m1m2;
 
-      float num   = (2.0f * m1m2 + kC1) * (2.0f * s12 + kC2);
-      float denom = (m1sq + m2sq + kC1) * (s1sq + s2sq + kC2);
-      float ssim  = num / denom;
+    float num   = (2.0f * m1m2 + kC1) * (2.0f * s12 + kC2);
+    float denom = (m1sq + m2sq + kC1) * (s1sq + s2sq + kC2);
+    float ssim  = num / denom;
 
-      ssim_sum += ssim;
+    ssim_sum += ssim;
 
-      if (error_map != nullptr) {
-        // Map 1-SSIM error to magma palette, same as ssimulacra2.
-        float err = 1.0f - ssim;
-        if (err < 0.0f) err = 0.0f;
-        if (err > 1.0f) err = 1.0f;
-        int value = int(255 * err);
-        ((uint32_t*)error_map)[y * w + x] = MagmaMap[value];
-      }
+    if (err_out) {
+      // Map 1-SSIM error to magma palette, same as ssimulacra2.
+      float err = 1.0f - ssim;
+      if (err < 0.0f) err = 0.0f;
+      if (err > 1.0f) err = 1.0f;
+      int value = int(255 * err);
+      err_out[i] = MagmaMap[value];
     }
   }
 
@@ -1434,14 +1424,13 @@ double ic_msssim_score(int w, int h, const unsigned char* orig, const unsigned c
   constexpr float kR = 0.299f / 255.0f;
   constexpr float kG = 0.587f / 255.0f;
   constexpr float kB = 0.114f / 255.0f;
-  for (int y = 0; y < h; y++) {
-    float* row1 = img1.Row(y);
-    float* row2 = img2.Row(y);
-    const unsigned char* p1 = orig + y * w * 4;
-    const unsigned char* p2 = dist + y * w * 4;
-    for (int x = 0; x < w; x++) {
-      row1[x] = kR * p1[4*x + 0] + kG * p1[4*x + 1] + kB * p1[4*x + 2];
-      row2[x] = kR * p2[4*x + 0] + kG * p2[4*x + 1] + kB * p2[4*x + 2];
+  {
+    const size_t n0 = size_t(w) * size_t(h);
+    float* row1 = img1.data;
+    float* row2 = img2.data;
+    for (size_t i = 0; i < n0; i++) {
+      row1[i] = kR * orig[4*i + 0] + kG * orig[4*i + 1] + kB * orig[4*i + 2];
+      row2[i] = kR * dist[4*i + 0] + kG * dist[4*i + 1] + kB * dist[4*i + 2];
     }
   }
 
@@ -1473,70 +1462,60 @@ double ic_msssim_score(int w, int h, const unsigned char* orig, const unsigned c
     blur(img2, &mu2);
 
     // sigma1_sq = blur(img1²)   (the mu1² subtraction is folded into the per-pixel formula)
-    for (size_t y = 0; y < sy; y++) {
-      const float* r1 = img1.Row(y);
-      float* rt = tmp.Row(y);
-      for (size_t x = 0; x < sx; x++) rt[x] = r1[x] * r1[x];
+    const size_t n = sx * sy;
+    {
+      const float* p1 = img1.data;
+      const float* p2 = img2.data;
+      float* pt = tmp.data;
+      for (size_t i = 0; i < n; i++) pt[i] = p1[i] * p1[i];
+      blur(tmp, &sigma1_sq);
+      for (size_t i = 0; i < n; i++) pt[i] = p2[i] * p2[i];
+      blur(tmp, &sigma2_sq);
+      for (size_t i = 0; i < n; i++) pt[i] = p1[i] * p2[i];
+      blur(tmp, &sigma12);
     }
-    blur(tmp, &sigma1_sq);
-
-    for (size_t y = 0; y < sy; y++) {
-      const float* r2 = img2.Row(y);
-      float* rt = tmp.Row(y);
-      for (size_t x = 0; x < sx; x++) rt[x] = r2[x] * r2[x];
-    }
-    blur(tmp, &sigma2_sq);
-
-    for (size_t y = 0; y < sy; y++) {
-      const float* r1 = img1.Row(y);
-      const float* r2 = img2.Row(y);
-      float* rt = tmp.Row(y);
-      for (size_t x = 0; x < sx; x++) rt[x] = r1[x] * r2[x];
-    }
-    blur(tmp, &sigma12);
 
     // Mean SSIM (= l·cs) and mean CS over pixels. The cs/l split here uses
     // C3 = C2/2 so that l·cs simplifies to (2σxy+C2)/(σx²+σy²+C2) · l —
     // saves one division per pixel.
     double ssim_sum = 0.0;
     double cs_sum = 0.0;
-    const double one_per_pixels = 1.0 / (double(sx) * double(sy));
+    const double one_per_pixels = 1.0 / double(n);
     const bool fill_err = (error_map != nullptr) && (j == 0);
+    const float* pm1  = mu1.data;
+    const float* pm2  = mu2.data;
+    const float* ps11 = sigma1_sq.data;
+    const float* ps22 = sigma2_sq.data;
+    const float* ps12 = sigma12.data;
+    uint32_t* err_out = fill_err ? (uint32_t*)error_map : nullptr;
 
-    for (size_t y = 0; y < sy; y++) {
-      const float* rm1  = mu1.Row(y);
-      const float* rm2  = mu2.Row(y);
-      const float* rs11 = sigma1_sq.Row(y);
-      const float* rs22 = sigma2_sq.Row(y);
-      const float* rs12 = sigma12.Row(y);
-      for (size_t x = 0; x < sx; x++) {
-        float m1 = rm1[x];
-        float m2 = rm2[x];
-        float m1m2 = m1 * m2;
-        float m1sq = m1 * m1;
-        float m2sq = m2 * m2;
-        float s1sq = rs11[x] - m1sq;
-        float s2sq = rs22[x] - m2sq;
-        float s12  = rs12[x] - m1m2;
+    for (size_t i = 0; i < n; i++) {
+      float m1 = pm1[i];
+      float m2 = pm2[i];
+      float m1m2 = m1 * m2;
+      float m1sq = m1 * m1;
+      float m2sq = m2 * m2;
+      float s1sq = ps11[i] - m1sq;
+      float s2sq = ps22[i] - m2sq;
+      float s12  = ps12[i] - m1m2;
 
-        float l_num  = 2.0f * m1m2 + kC1;
-        float l_den  = m1sq + m2sq + kC1;
-        float cs_num = 2.0f * s12  + kC2;
-        float cs_den = s1sq + s2sq + kC2;
+      float l_num  = 2.0f * m1m2 + kC1;
+      float l_den  = m1sq + m2sq + kC1;
+      float cs_num = 2.0f * s12  + kC2;
+      float cs_den = s1sq + s2sq + kC2;
 
-        float cs   = cs_num / cs_den;
-        float ssim = (l_num / l_den) * cs;
+      float cs   = cs_num / cs_den;
+      float ssim = (l_num / l_den) * cs;
 
-        ssim_sum += ssim;
-        cs_sum   += cs;
+      ssim_sum += ssim;
+      cs_sum   += cs;
 
-        if (fill_err) {
-          float err = 1.0f - ssim;
-          if (err < 0.0f) err = 0.0f;
-          if (err > 1.0f) err = 1.0f;
-          int value = int(255 * err);
-          ((uint32_t*)error_map)[y * sx + x] = MagmaMap[value];
-        }
+      if (err_out) {
+        float err = 1.0f - ssim;
+        if (err < 0.0f) err = 0.0f;
+        if (err > 1.0f) err = 1.0f;
+        int value = int(255 * err);
+        err_out[i] = MagmaMap[value];
       }
     }
 
