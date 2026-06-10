@@ -1349,10 +1349,7 @@ double ic_ssim_score(int w, int h, const unsigned char* orig, const unsigned cha
 
     if (err_out) {
       // Map 1-SSIM error to magma palette, same as ssimulacra2.
-      float err = 1.0f - ssim;
-      if (err < 0.0f) err = 0.0f;
-      if (err > 1.0f) err = 1.0f;
-      int value = int(255 * err);
+      int value = int(255 * clamp(1.0f - ssim, 0.0f, 1.0f));
       err_out[i] = MagmaMap[value];
     }
   }
@@ -1511,10 +1508,7 @@ double ic_msssim_score(int w, int h, const unsigned char* orig, const unsigned c
       cs_sum   += cs;
 
       if (err_out) {
-        float err = 1.0f - ssim;
-        if (err < 0.0f) err = 0.0f;
-        if (err > 1.0f) err = 1.0f;
-        int value = int(255 * err);
+        int value = int(255 * clamp(1.0f - ssim, 0.0f, 1.0f));
         err_out[i] = MagmaMap[value];
       }
     }
