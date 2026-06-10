@@ -3,7 +3,11 @@ name: build
 on:
   push:
     branches: [main, omp-experiment, pfor-experiment]
+    paths-ignore:
+      - '**.md'
   pull_request:
+    paths-ignore:
+      - '**.md'
 
 jobs:
   build:
@@ -15,7 +19,12 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
+      # lfs: false (also the default) — skip downloading LFS objects.
+      # They aren't needed to build and downloads count against the org
+      # bandwidth quota.
       - uses: actions/checkout@v4
+        with:
+          lfs: false
 
       # OpenMP runtime — Linux gcc and Windows MSVC ship it inline.
       # Apple clang does not, so install brew libomp for the omp-experiment
