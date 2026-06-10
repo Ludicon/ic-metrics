@@ -1541,3 +1541,281 @@ double ic_msssim_score(int w, int h, const unsigned char* orig, const unsigned c
   if (weights_used <= 0.0) return 0.0;
   return exp(log_msssim / weights_used);
 }
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Butteraugli
+//
+// Port of google/butteraugli. Distance metric (not quality): 0 = identical,
+// 1 ≈ barely visible difference, >2 ≈ obvious. We keep our own translation
+// of the algorithm (Image3F + ScratchBuffer instead of std::vector<ImageF>)
+// rather than sharing ssimulacra2's XYB transform — butteraugli's matrix,
+// per-channel bias, Gamma polynomial, and pre-opsin retinal blur all differ
+// from ssimulacra2's by enough that parameterizing would be uglier than
+// keeping both.
+//
+// Current state: ToXYBButteraugli + ic_butteraugli_distance skeleton in
+// place. Distance is a placeholder (RMSE in XYB) until SeparateFrequencies
+// + Malta + Mask + final aggregation land in follow-up commits.
+
+namespace {
+
+// OpsinAbsorbance matrix coefficients per the Photopsin absorbance model,
+// straight from google/butteraugli (different values than ssimulacra2's
+// kOpsinAbsorbanceMatrix). Indices 0–2 / 4–6 / 8–10 are the 3×3 matrix
+// rows; 3 / 7 / 11 are the per-channel bias added to each row.
+static const double kButteraugliOpsinMix[12] = {
+    0.254462330846,    0.488238255095,    0.0635278003854,    1.01681026909,
+    0.195214015766,    0.568019861857,    0.0860755536007,    1.1510118369,
+    0.07374607900105684, 0.06142425304154509, 0.24416850520714256, 1.20481945273,
+};
+
+static inline void ButteraugliOpsinAbsorbance(float in0, float in1, float in2,
+                                              float* out0, float* out1, float* out2) {
+  const double* m = kButteraugliOpsinMix;
+  *out0 = float(m[0])  * in0 + float(m[1])  * in1 + float(m[2])  * in2 + float(m[3]);
+  *out1 = float(m[4])  * in0 + float(m[5])  * in1 + float(m[6])  * in2 + float(m[7]);
+  *out2 = float(m[8])  * in0 + float(m[9])  * in1 + float(m[10]) * in2 + float(m[11]);
+}
+
+// Rational-polynomial evaluation via Clenshaw's recursion on Chebyshev
+// polynomials of the first kind. Direct port of butteraugli's
+// RationalPolynomial / ClenshawRecursion machinery (5/5 degree, ~0.1%
+// accuracy, numerically stable).
+static inline double ClenshawEval6(double x, const double c[6]) {
+  // Manually unrolled; matches the recursion in butteraugli.h.
+  double b1 = 0.0;
+  double b2 = 0.0;
+  // index 5 .. 1: t = 2*x*b1 - b2 + c[i]; rotate.
+  double t;
+  t = 2.0*x*b1 - b2 + c[5]; b2 = b1; b1 = t;
+  t = 2.0*x*b1 - b2 + c[4]; b2 = b1; b1 = t;
+  t = 2.0*x*b1 - b2 + c[3]; b2 = b1; b1 = t;
+  t = 2.0*x*b1 - b2 + c[2]; b2 = b1; b1 = t;
+  t = 2.0*x*b1 - b2 + c[1]; b2 = b1; b1 = t;
+  // index 0 base case: t = x*b1 - b2 + c[0] (no doubling).
+  b1 = x*b1 - b2 + c[0];
+  return b1;
+}
+
+static inline double ButteraugliGamma(double v) {
+  // Coefficients copied verbatim from butteraugli's GammaPolynomial.
+  static const double kMin =  0.971783;
+  static const double kMax =  590.188894;
+  static const double p[6] = {
+    98.7821300963361, 164.273222212631, 92.948112871376,
+    33.8165311212688, 6.91626704983562, 0.556380877028234,
+  };
+  static const double q[6] = {
+    1.0, 1.64339473427892, 0.89392405219969, 0.298947051776379,
+    0.0507146002577288, 0.00226495093949756,
+  };
+  const double x01 = (v - kMin) / (kMax - kMin);
+  const double xc  = 2.0 * x01 - 1.0;
+  const double yp = ClenshawEval6(xc, p);
+  const double yq = ClenshawEval6(xc, q);
+  return yq == 0.0 ? 0.0 : yp / yq;
+}
+
+// Build a 1-D Gaussian kernel into a stack buffer. `m = 2.25` matches
+// upstream's truncation distance; the kernel runs from -diff to +diff with
+// diff = max(1, int(m*|sigma|)). Returns the kernel length (2*diff+1).
+// kButteraugliMaxKernel is large enough for sigma up to ~14 (kernel of 63).
+static constexpr int kButteraugliMaxKernel = 64;
+
+static int ButteraugliKernel(float sigma, float kernel[kButteraugliMaxKernel]) {
+  const float m = 2.25f;
+  const float scaler = -1.0f / (2.0f * sigma * sigma);
+  int diff = (int)(m * fabsf(sigma));
+  if (diff < 1) diff = 1;
+  const int len = 2 * diff + 1;
+  JXL_CHECK(len <= kButteraugliMaxKernel);
+  for (int i = -diff; i <= diff; ++i) {
+    kernel[i + diff] = expf(scaler * (float)(i * i));
+  }
+  return len;
+}
+
+// One-pass *transposing* horizontal convolution. Reads `in` (xs × ys),
+// writes its transposed convolution into `out` (ys × xs). The border
+// columns use the `border_ratio` blend that upstream uses: weight is a
+// linear mix between the truncated-kernel sum (no-border end) and the
+// full kernel sum (border end). border_ratio == 0 means we re-normalize
+// by the live taps only (clamp-edge style); == 1 means we use the
+// untouched kernel weights (zero-pad style).
+static void ButteraugliConvolution(const ImageF& in, const float* kernel, int len,
+                                   float border_ratio, ImageF* out) {
+  const int xs = (int)in.xsize();
+  const int ys = (int)in.ysize();
+  JXL_CHECK(out->xsize() == (size_t)ys);
+  JXL_CHECK(out->ysize() == (size_t)xs);
+  const int offset = len / 2;
+  float weight_no_border = 0.0f;
+  for (int j = 0; j < len; ++j) weight_no_border += kernel[j];
+  const float inv_no_border = 1.0f / weight_no_border;
+
+  // Pre-scale a kernel copy for the interior pass (no per-pixel divide).
+  float scaled[kButteraugliMaxKernel];
+  for (int j = 0; j < len; ++j) scaled[j] = kernel[j] * inv_no_border;
+
+  const int border1 = (xs <= offset) ? xs : offset;
+  const int border2 = xs - offset;
+
+  // Border + interior + border, writing into the transposed output one
+  // column at a time (each input x becomes an output row).
+  auto border_col = [&](int x) {
+    const int minx = (x < offset) ? 0 : x - offset;
+    const int maxx = (xs - 1 < x + offset) ? xs - 1 : x + offset;
+    float w = 0.0f;
+    for (int j = minx; j <= maxx; ++j) w += kernel[j - x + offset];
+    w = (1.0f - border_ratio) * w + border_ratio * weight_no_border;
+    const float scale = 1.0f / w;
+    float* row_out = out->Row((size_t)x);
+    for (int y = 0; y < ys; ++y) {
+      const float* row_in = in.Row((size_t)y);
+      float sum = 0.0f;
+      for (int j = minx; j <= maxx; ++j) sum += row_in[j] * kernel[j - x + offset];
+      row_out[y] = sum * scale;
+    }
+  };
+  for (int x = 0; x < border1; ++x) border_col(x);
+  for (int x = border2; x < xs; ++x) border_col(x);
+
+  // Interior: per-row pass over the scaled kernel.
+  for (int y = 0; y < ys; ++y) {
+    const float* row_in = in.Row((size_t)y);
+    for (int x = border1; x < border2; ++x) {
+      const int d = x - offset;
+      float sum = 0.0f;
+      for (int j = 0; j < len; ++j) sum += row_in[d + j] * scaled[j];
+      out->Row((size_t)x)[y] = sum;
+    }
+  }
+}
+
+// Full 2-D Gaussian blur (two transposing 1-D convolutions). `tmp` is the
+// scratch buffer for the in-between transposed image (must have dims
+// in.ysize() × in.xsize()). `out` must have the same dims as `in`.
+static void ButteraugliBlur(const ImageF& in, float sigma, float border_ratio,
+                            ImageF* tmp, ImageF* out) {
+  float kernel[kButteraugliMaxKernel];
+  const int len = ButteraugliKernel(sigma, kernel);
+  ButteraugliConvolution(in, kernel, len, border_ratio, tmp);
+  ButteraugliConvolution(*tmp, kernel, len, border_ratio, out);
+}
+
+// OpsinDynamicsImage equivalent. `tmp`, `blurred`, and `xyb` are caller-
+// allocated; tmp is the transposing-convolution scratch (sized H × W per
+// channel, same backing storage reused for all three channels via Plane()).
+static void ToXYBButteraugli(const Image3F& rgb, ImageF* tmp,
+                             Image3F* blurred, Image3F* xyb) {
+  const float kSigma = 1.2f;
+  const float kBorder = 0.0f;  // zero-padded at edges, per upstream
+
+  for (int c = 0; c < 3; ++c) {
+    ButteraugliBlur(rgb.Plane(c), kSigma, kBorder, tmp, &blurred->Plane(c));
+  }
+
+  const size_t xs = rgb.xsize();
+  const size_t ys = rgb.ysize();
+  for (size_t y = 0; y < ys; ++y) {
+    const float* r  = rgb.PlaneRow(0, y);
+    const float* g  = rgb.PlaneRow(1, y);
+    const float* b  = rgb.PlaneRow(2, y);
+    const float* br = blurred->PlaneRow(0, y);
+    const float* bg = blurred->PlaneRow(1, y);
+    const float* bb = blurred->PlaneRow(2, y);
+    float* ox = xyb->PlaneRow(0, y);
+    float* oy = xyb->PlaneRow(1, y);
+    float* ob = xyb->PlaneRow(2, y);
+    for (size_t x = 0; x < xs; ++x) {
+      // Sensitivity ratio Gamma(opsin(blurred)) / opsin(blurred), per channel.
+      float pre0, pre1, pre2;
+      ButteraugliOpsinAbsorbance(br[x], bg[x], bb[x], &pre0, &pre1, &pre2);
+      const float s0 = (float)(ButteraugliGamma(pre0) / pre0);
+      const float s1 = (float)(ButteraugliGamma(pre1) / pre1);
+      const float s2 = (float)(ButteraugliGamma(pre2) / pre2);
+
+      // Apply opsin to actual pixel, modulate by sensitivity, mix to XYB.
+      float m0, m1, m2;
+      ButteraugliOpsinAbsorbance(r[x], g[x], b[x], &m0, &m1, &m2);
+      m0 *= s0;
+      m1 *= s1;
+      m2 *= s2;
+      ox[x] = m0 - m1;   // X = R - G
+      oy[x] = m0 + m1;   // Y = R + G
+      ob[x] = m2;        // B
+    }
+  }
+}
+
+}  // namespace (Butteraugli internals)
+
+
+size_t ic_butteraugli_scratch_size(int w, int h) {
+  // Generous upper bound for the WIP pipeline:
+  //   orig_rgb, dist_rgb           (2 Image3F = 6 wh)
+  //   xyb_orig, xyb_dist           (2 Image3F = 6 wh)
+  //   blurred_orig, blurred_dist   (2 Image3F = 6 wh)
+  //   tmp transposed convolution   (1 ImageF  = 1 wh)
+  // Total 19 wh; round up to 24 to leave headroom for the rest of the
+  // pipeline as it lands. Will be tightened once everything's in.
+  return usize(w) * usize(h) * sizeof(float) * 24;
+}
+
+double ic_butteraugli_distance(int w, int h, const unsigned char* orig,
+                               const unsigned char* dist, void* scratch_ptr,
+                               unsigned char* error_map) {
+  JXL_PROFILE_FUNC
+
+  // PLACEHOLDER scoring. Pipeline so far: RGBA8 -> RGB float [0,255] ->
+  // ToXYBButteraugli on each side. The final aggregation will replace
+  // this max-of-XYB-channel-distance with SeparateFrequencies + Malta +
+  // Mask + max-pool. Until then, the score is just a proxy that's 0 for
+  // identical inputs and positive otherwise.
+  (void)error_map;
+  ScratchBuffer scratch = { scratch_ptr, ic_butteraugli_scratch_size(w, h), 0 };
+
+  Image3F orig_rgb(w, h, scratch);
+  Image3F dist_rgb(w, h, scratch);
+
+  // Unpack RGBA8 -> 3 planar float images, value range [0, 255] per upstream.
+  const size_t n = size_t(w) * size_t(h);
+  {
+    float* r0 = orig_rgb.PlaneRow(0, 0);
+    float* g0 = orig_rgb.PlaneRow(1, 0);
+    float* b0 = orig_rgb.PlaneRow(2, 0);
+    float* r1 = dist_rgb.PlaneRow(0, 0);
+    float* g1 = dist_rgb.PlaneRow(1, 0);
+    float* b1 = dist_rgb.PlaneRow(2, 0);
+    for (size_t i = 0; i < n; i++) {
+      r0[i] = (float)orig[4*i + 0];
+      g0[i] = (float)orig[4*i + 1];
+      b0[i] = (float)orig[4*i + 2];
+      r1[i] = (float)dist[4*i + 0];
+      g1[i] = (float)dist[4*i + 1];
+      b1[i] = (float)dist[4*i + 2];
+    }
+  }
+
+  ImageF tmp(h, w, scratch);
+  Image3F blurred_orig(w, h, scratch);
+  Image3F blurred_dist(w, h, scratch);
+  Image3F xyb_orig(w, h, scratch);
+  Image3F xyb_dist(w, h, scratch);
+
+  ToXYBButteraugli(orig_rgb, &tmp, &blurred_orig, &xyb_orig);
+  ToXYBButteraugli(dist_rgb, &tmp, &blurred_dist, &xyb_dist);
+
+  // Placeholder distance: RMSE across the three XYB channels.
+  double sse = 0.0;
+  for (int c = 0; c < 3; ++c) {
+    const float* a = xyb_orig.PlaneRow(c, 0);
+    const float* b = xyb_dist.PlaneRow(c, 0);
+    for (size_t i = 0; i < n; i++) {
+      const double d = (double)a[i] - (double)b[i];
+      sse += d * d;
+    }
+  }
+  return sqrt(sse / double(3 * n));
+}

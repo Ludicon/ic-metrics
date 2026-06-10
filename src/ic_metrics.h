@@ -33,3 +33,12 @@ size_t ic_msssim_score_scratch_size(int w, int h);
 double ic_msssim_score(int w, int h, const unsigned char *orig,
                        const unsigned char *dist, void *scratch_ptr,
                        unsigned char *error_map = nullptr);
+
+// Butteraugli — Alakuijala et al. (google/butteraugli). Distance, NOT quality:
+// 0 = identical, ~1 = barely visible difference, >2 = obvious. Same RGBA8
+// input + scratch-buffer pattern. error_map (if non-null) is the per-pixel
+// distance map, magma-mapped to RGBA8.
+size_t ic_butteraugli_scratch_size(int w, int h);
+double ic_butteraugli_distance(int w, int h, const unsigned char *orig,
+                               const unsigned char *dist, void *scratch_ptr,
+                               unsigned char *error_map = nullptr);
