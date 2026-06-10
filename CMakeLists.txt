@@ -156,6 +156,26 @@ else()
     message(STATUS "fssimu2: disabled (zig not found or submodule missing)")
 endif()
 
+
+# --- butteraugli: upstream reference impl (google/butteraugli). No CMake
+#     or Bazel-only files needed; we just compile butteraugli.cc into our
+#     own static library next to the shim. -----------------------------
+if(EXISTS ${CMAKE_SOURCE_DIR}/extern/butteraugli/butteraugli/butteraugli.cc)
+    add_library(butteraugli_impl STATIC
+        src/impl_butteraugli.cpp
+        extern/butteraugli/butteraugli/butteraugli.cc
+    )
+    target_include_directories(butteraugli_impl PRIVATE
+        extern/butteraugli)
+
+    list(APPEND IMPL_LIBS butteraugli_impl)
+    list(APPEND IMPL_DEFINES HAVE_BUTTERAUGLI=1)
+
+    message(STATUS "butteraugli: enabled")
+else()
+    message(STATUS "butteraugli: disabled (submodule missing)")
+endif()
+
 endif() # IC_METRICS_BUILD_COMPARE
 
 

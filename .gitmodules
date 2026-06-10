@@ -7,3 +7,6 @@
 [submodule "extern/fssimu2"]
 	path = extern/fssimu2
 	url = https://github.com/gianni-rosato/fssimu2
+[submodule "extern/butteraugli"]
+	path = extern/butteraugli
+	url = https://github.com/google/butteraugli
