@@ -35,7 +35,7 @@ score = ic_ssimulacra2_score(w, h, orig_rgba, dist_rgba, scratch, error_map);
 free(scratch);
 ```
 
-`ic_ssim_score` has exactly the same API, but computes the SSIM metric instead.
+`ic_ssim_score` and `ic_msssim_score` have exactly the same API, but compute the SSIM and MS-SSIM metrics respectively.
 
 ## Performance
 
