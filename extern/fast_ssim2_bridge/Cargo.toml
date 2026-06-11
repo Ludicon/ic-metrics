@@ -1,0 +1,18 @@
+[package]
+name = "fast_ssim2_bridge"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# cdylib (not staticlib): keeps Rust std private to the shared object so its
+# symbols don't collide with rust_av_bridge's bundled std when both are linked
+# into one executable. Mirrors how the fssimu2 dylib is integrated.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+fast-ssim2 = { path = "../fast-ssim2/fast-ssim2" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

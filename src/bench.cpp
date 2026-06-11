@@ -60,6 +60,12 @@ static const Impl IMPLS[] = {
 #if HAVE_CLOUDINARY
     { "cloudinary", cloudinary_compute_score },
 #endif
+#if HAVE_FAST_SSIM2
+    { "fast-ssim2", fast_ssim2_compute_score },
+#endif
+#if HAVE_VSZIP
+    { "vszip", vszip_compute_score },
+#endif
 };
 static const int NUM_IMPLS = (int)(sizeof(IMPLS) / sizeof(IMPLS[0]));
 

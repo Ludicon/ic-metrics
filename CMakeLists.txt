@@ -128,6 +128,41 @@ else()
 endif()
 
 
+# --- fast-ssim2: Rust crate (imazen), via a small companion C-ABI bridge ----
+# Built as a cdylib (see the bridge's Cargo.toml) so its bundled Rust std stays
+# private and doesn't clash with rust_av_bridge's static std. Linked like the
+# fssimu2 dylib: SHARED IMPORTED + a build rpath. The bridge has a path
+# dependency on the fast-ssim2 submodule's inner crate, so require it too.
+if(CARGO_EXECUTABLE
+   AND EXISTS ${CMAKE_SOURCE_DIR}/extern/fast_ssim2_bridge/Cargo.toml
+   AND EXISTS ${CMAKE_SOURCE_DIR}/extern/fast-ssim2/fast-ssim2/Cargo.toml)
+    set(FAST_SSIM2_DIR ${CMAKE_SOURCE_DIR}/extern/fast_ssim2_bridge)
+    set(FAST_SSIM2_LIB ${FAST_SSIM2_DIR}/target/release/${CMAKE_SHARED_LIBRARY_PREFIX}fast_ssim2_bridge${CMAKE_SHARED_LIBRARY_SUFFIX})
+
+    add_custom_command(
+        OUTPUT ${FAST_SSIM2_LIB}
+        COMMAND ${CARGO_EXECUTABLE} build --release --manifest-path ${FAST_SSIM2_DIR}/Cargo.toml
+        DEPENDS ${FAST_SSIM2_DIR}/Cargo.toml ${FAST_SSIM2_DIR}/src/lib.rs
+        COMMENT "Building fast_ssim2_bridge (cargo)"
+        VERBATIM
+    )
+    add_custom_target(fast_ssim2_build DEPENDS ${FAST_SSIM2_LIB})
+
+    add_library(fast_ssim2 SHARED IMPORTED)
+    set_target_properties(fast_ssim2 PROPERTIES IMPORTED_LOCATION ${FAST_SSIM2_LIB})
+    add_dependencies(fast_ssim2 fast_ssim2_build)
+
+    list(APPEND IMPL_SOURCES src/impl_fast_ssim2.cpp)
+    list(APPEND IMPL_LIBS fast_ssim2)
+    list(APPEND IMPL_DEFINES HAVE_FAST_SSIM2=1)
+    list(APPEND IMPL_RPATH ${FAST_SSIM2_DIR}/target/release)
+
+    message(STATUS "fast-ssim2: enabled (${FAST_SSIM2_LIB})")
+else()
+    message(STATUS "fast-ssim2: disabled (cargo not found, or bridge/submodule missing)")
+endif()
+
+
 # --- fssimu2: Zig project, already exposes a C ABI -------------------------
 find_program(ZIG_EXECUTABLE zig)
 if(ZIG_EXECUTABLE AND EXISTS ${CMAKE_SOURCE_DIR}/extern/fssimu2/build.zig)
@@ -159,6 +194,46 @@ if(ZIG_EXECUTABLE AND EXISTS ${CMAKE_SOURCE_DIR}/extern/fssimu2/build.zig)
     message(STATUS "fssimu2: enabled (${FSSIMU2_LIB})")
 else()
     message(STATUS "fssimu2: disabled (zig not found or submodule missing)")
+endif()
+
+
+# --- vszip: SSIMULACRA2 filter from dnjulek/vapoursynth-zip ----------------
+# That repo is a VapourSynth plugin, but its src/filters/ssimulacra2.zig is a
+# standalone (std-only) algorithm. Our companion bridge (extern/vszip_bridge)
+# pulls in just that file and wraps it in a small C ABI dylib.
+if(ZIG_EXECUTABLE
+   AND EXISTS ${CMAKE_SOURCE_DIR}/extern/vszip_bridge/build.zig
+   AND EXISTS ${CMAKE_SOURCE_DIR}/extern/vapoursynth-zip/src/filters/ssimulacra2.zig)
+    set(VSZIP_DIR ${CMAKE_SOURCE_DIR}/extern/vszip_bridge)
+    set(VSZIP_LIB ${VSZIP_DIR}/zig-out/lib/${CMAKE_SHARED_LIBRARY_PREFIX}vszip_ssimu2${CMAKE_SHARED_LIBRARY_SUFFIX})
+    set(VSZIP_INCLUDE ${VSZIP_DIR}/zig-out/include)
+
+    add_custom_command(
+        OUTPUT ${VSZIP_LIB} ${VSZIP_INCLUDE}/vszip_ssimu2.h
+        COMMAND ${ZIG_EXECUTABLE} build --release=fast
+        WORKING_DIRECTORY ${VSZIP_DIR}
+        DEPENDS ${VSZIP_DIR}/src/wrapper.zig ${VSZIP_DIR}/build.zig
+                ${CMAKE_SOURCE_DIR}/extern/vapoursynth-zip/src/filters/ssimulacra2.zig
+        COMMENT "Building vszip_bridge (zig)"
+        VERBATIM
+    )
+    add_custom_target(vszip_build DEPENDS ${VSZIP_LIB})
+
+    add_library(vszip SHARED IMPORTED)
+    set_target_properties(vszip PROPERTIES
+        IMPORTED_LOCATION ${VSZIP_LIB}
+        INTERFACE_INCLUDE_DIRECTORIES ${VSZIP_INCLUDE}
+    )
+    add_dependencies(vszip vszip_build)
+
+    list(APPEND IMPL_SOURCES src/impl_vszip.cpp)
+    list(APPEND IMPL_LIBS vszip)
+    list(APPEND IMPL_DEFINES HAVE_VSZIP=1)
+    list(APPEND IMPL_RPATH ${VSZIP_DIR}/zig-out/lib)
+
+    message(STATUS "vszip: enabled (${VSZIP_LIB})")
+else()
+    message(STATUS "vszip: disabled (zig not found or bridge/submodule missing)")
 endif()
 
 endif() # IC_METRICS_BUILD_COMPARE

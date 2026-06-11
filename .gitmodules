@@ -7,3 +7,9 @@
 [submodule "extern/fssimu2"]
 	path = extern/fssimu2
 	url = https://github.com/gianni-rosato/fssimu2
+[submodule "extern/fast-ssim2"]
+	path = extern/fast-ssim2
+	url = https://github.com/imazen/fast-ssim2.git
+[submodule "extern/vapoursynth-zip"]
+	path = extern/vapoursynth-zip
+	url = https://github.com/dnjulek/vapoursynth-zip.git

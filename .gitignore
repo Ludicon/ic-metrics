@@ -3,6 +3,8 @@ build-release/
 build-msvc/
 build-wasm/
 target/
+zig-out/
+.zig-cache/
 
 .DS_Store
 *.o
