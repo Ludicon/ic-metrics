@@ -93,7 +93,6 @@ IC_VAR_BOOL(ssimu2_alpha_blend, false);
 //   ClampBorder = off-image is 0. Matches cloudinary / rust-av.
 //   Mirror      = Mirror with edge repeat: pixel[-1] = pixel[0],
 //                 pixel[-2] = pixel[1], ... pixel[w] = pixel[w-1].
-)
 enum BlurWrapMode {
     BlurWrapMode_ClampEdge   = 0,
     BlurWrapMode_ClampBorder = 1,
