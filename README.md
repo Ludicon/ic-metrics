@@ -6,9 +6,9 @@ A small C++ library for image-quality metrics.
 
 This code is based on [Cloudinary's SSIMULACRA2](https://github.com/cloudinary/ssimulacra2) by Jon Sneyers, but refactored to:
 
-- build as a **single compilation unit** (one `.cpp` + one `.h`),
+- build as a **single compilation unit** (`ic_metrics.cpp` + `ic_metrics.h`),
 - contain **no dependencies outside the C standard library** + compiler's SIMD intrinsics,
-- do **zero internal heap allocations** (caller passes a scratch buffer),
+- performs **no heap memory allocations** (caller passes a scratch buffer),
 - also provide **SSIM** and **MS-SSIM** implementations.
 
 More metrics are planned.
