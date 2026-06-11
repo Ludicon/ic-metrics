@@ -13,3 +13,6 @@
 [submodule "extern/vapoursynth-zip"]
 	path = extern/vapoursynth-zip
 	url = https://github.com/dnjulek/vapoursynth-zip.git
+[submodule "extern/Vship"]
+	path = extern/Vship
+	url = https://codeberg.org/Line-fr/Vship.git

@@ -50,10 +50,11 @@ Measured on an Apple M4 Pro (10 P-core + 4 E-core).
 
 The multi-thread numbers above are from the `omp-experiment` branch, which adds `#pragma omp parallel for` to the row loops and reductions to the two map kernels. Past ~4 threads the inner blur passes become memory-bandwidth-bound, so scaling tapers off. These figures predate the default weight pruning, so they isolate thread scaling alone; current `main` single-thread is faster (see the comparison table below).
 
-**Vs. other SSIMULACRA 2 implementations** (single-thread):
+**Vs. other SSIMULACRA 2 implementations:**
 
 | implementation           | 1024 × 1024 | 4096 × 4096 | notes |
 |---|---:|---:|---|
+| [Vship]                  |      7 ms   |    101 ms   | GPU, Vulkan/MoltenVK (see note) |
 | `ic-metrics` (this)      |     29 ms   |    510 ms   | NEON / AVX2 path, default weight pruning |
 | [fssimu2]                |     43 ms   |    757 ms   | Zig port |
 | [vszip]                  |     63 ms   |   1010 ms   | Zig, from the vapoursynth-zip plugin, weight pruning |
@@ -61,13 +62,14 @@ The multi-thread numbers above are from the `omp-experiment` branch, which adds 
 | [fast-ssim2]             |     48 ms   |   1280 ms   | Rust, SIMD-accelerated |
 | [rust-av/ssimulacra2]    |     82 ms   |   1575 ms   | Rust port |
 
-Median across `self` + JPEG q40/q70/q90 distortions, 10 iterations per cell, `bench --threads 1`. `ic-metrics` and `vszip` run with their default weight pruning (see [Differences](#differences)); the rest compute every sub-score.
+Median across `self` + JPEG q40/q70/q90 distortions, 10 iterations per cell, `bench --threads 1`. The CPU implementations are single-thread; `ic-metrics` and `vszip` use their default weight pruning (see [Differences](#differences)), the rest compute every sub-score. [Vship] is a **GPU** implementation, timed on the M4 Pro through its experimental Vulkan backend on MoltenVK (its time includes our RGBA8→planar deinterleave + host↔device transfer); its scores track the cluster to ~0.2–0.3, with identical images landing near 99.9 rather than 100.
 
 [cloudinary/ssimulacra2]: https://github.com/cloudinary/ssimulacra2
 [rust-av/ssimulacra2]:    https://github.com/rust-av/ssimulacra2
 [fssimu2]:                https://github.com/gianni-rosato/fssimu2
 [fast-ssim2]:             https://github.com/imazen/fast-ssim2
 [vszip]:                  https://github.com/dnjulek/vapoursynth-zip
+[Vship]:                  https://codeberg.org/Line-fr/Vship
 
 ## Differences
 
@@ -99,7 +101,7 @@ CMake (≥ 3.20) is the only requirement. The `omp-experiment` branch additional
 The repo also ships two example tools:
 
 - **`ssimudiff`** — score two PNGs and write an error-map PNG: `ssimudiff orig.png dist.png error.png`
-- **`bench` / `compare`** — perf and cross-implementation correctness harnesses (compare against [cloudinary/ssimulacra2](https://github.com/cloudinary/ssimulacra2), [rust-av/ssimulacra2](https://github.com/rust-av/ssimulacra2), [fssimu2](https://github.com/gianni-rosato/fssimu2), [fast-ssim2](https://github.com/imazen/fast-ssim2), and [vszip](https://github.com/dnjulek/vapoursynth-zip) when their submodules are checked out under `extern/`).
+- **`bench` / `compare`** — perf and cross-implementation correctness harnesses (compare against [cloudinary/ssimulacra2](https://github.com/cloudinary/ssimulacra2), [rust-av/ssimulacra2](https://github.com/rust-av/ssimulacra2), [fssimu2](https://github.com/gianni-rosato/fssimu2), [fast-ssim2](https://github.com/imazen/fast-ssim2), [vszip](https://github.com/dnjulek/vapoursynth-zip), and [Vship](https://codeberg.org/Line-fr/Vship) (GPU) when their submodules are checked out under `extern/`).
 
 ## AI Disclaimer
 

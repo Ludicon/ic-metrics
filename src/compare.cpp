@@ -50,6 +50,9 @@ static const Impl IMPLS[] = {
 #if HAVE_VSZIP
     { "vszip", vszip_compute_score },
 #endif
+#if HAVE_VSHIP
+    { "vship", vship_compute_score },
+#endif
 };
 static const int NUM_IMPLS = (int)(sizeof(IMPLS) / sizeof(IMPLS[0]));
 

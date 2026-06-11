@@ -13,3 +13,4 @@ double rust_av_compute_score(int w, int h, const unsigned char* orig, const unsi
 double cloudinary_compute_score(int w, int h, const unsigned char* orig, const unsigned char* dist);
 double fast_ssim2_compute_score(int w, int h, const unsigned char* orig, const unsigned char* dist);
 double vszip_compute_score(int w, int h, const unsigned char* orig, const unsigned char* dist);
+double vship_compute_score(int w, int h, const unsigned char* orig, const unsigned char* dist);

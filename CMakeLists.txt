@@ -236,6 +236,51 @@ else()
     message(STATUS "vszip: disabled (zig not found or bridge/submodule missing)")
 endif()
 
+
+# --- vship: GPU compute SSIMULACRA2 (Line-fr/Vship) ------------------------
+# Vship runs SSIMULACRA2 on the GPU via HIP/CUDA or Vulkan. We build its Vulkan
+# backend (host C++ + precompiled SPIR-V, compiled with the C++ compiler), which
+# on macOS runs through MoltenVK. Gated on a Vulkan loader being present, so
+# machines without one (incl. typical CI) just skip it. Note: Vship's Vulkan
+# path is upstream-flagged experimental, and via MoltenVK scores differ slightly
+# from a native run (e.g. identical images land near 99.8, not 100).
+find_program(MAKE_EXECUTABLE NAMES make gmake)
+find_library(VULKAN_LIBRARY NAMES vulkan vulkan-1 PATHS /usr/local/lib)
+if(MAKE_EXECUTABLE AND VULKAN_LIBRARY AND EXISTS ${CMAKE_SOURCE_DIR}/extern/Vship/Makefile)
+    set(VSHIP_DIR ${CMAKE_SOURCE_DIR}/extern/Vship)
+    set(VSHIP_LIB ${VSHIP_DIR}/libvship.so)  # Vship's Makefile names it .so even on macOS
+
+    add_custom_command(
+        OUTPUT ${VSHIP_LIB}
+        COMMAND ${MAKE_EXECUTABLE} build BACKEND=Vulkan
+        WORKING_DIRECTORY ${VSHIP_DIR}
+        DEPENDS ${VSHIP_DIR}/src/VshipLib.cpp ${VSHIP_DIR}/src/VshipAPI.h
+        COMMENT "Building libvship (make BACKEND=Vulkan)"
+        VERBATIM
+    )
+    add_custom_target(vship_build DEPENDS ${VSHIP_LIB})
+
+    add_library(vship SHARED IMPORTED)
+    set_target_properties(vship PROPERTIES
+        IMPORTED_LOCATION ${VSHIP_LIB}
+        INTERFACE_INCLUDE_DIRECTORIES ${VSHIP_DIR}/src
+    )
+    add_dependencies(vship vship_build)
+
+    list(APPEND IMPL_SOURCES src/impl_vship.cpp)
+    list(APPEND IMPL_LIBS vship)
+    list(APPEND IMPL_DEFINES HAVE_VSHIP=1)
+    # libvship.so resolves by its absolute install name; libvulkan via the
+    # SDK lib dir on the executable's rpath (libvship references @rpath/libvulkan).
+    list(APPEND IMPL_RPATH ${VSHIP_DIR})
+    get_filename_component(VULKAN_LIBDIR ${VULKAN_LIBRARY} DIRECTORY)
+    list(APPEND IMPL_RPATH ${VULKAN_LIBDIR})
+
+    message(STATUS "vship: enabled (${VSHIP_LIB}, Vulkan/MoltenVK)")
+else()
+    message(STATUS "vship: disabled (make/Vulkan loader/submodule missing)")
+endif()
+
 endif() # IC_METRICS_BUILD_COMPARE
 
 
