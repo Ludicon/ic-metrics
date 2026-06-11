@@ -91,10 +91,8 @@ IC_VAR_BOOL(ssimu2_alpha_blend, false);
 //   ClampEdge   = off-image is the nearest edge pixel (default; more physically
 //                 meaningful for typical texture content).
 //   ClampBorder = off-image is 0. Matches cloudinary / rust-av.
-//   Mirror      = RAD-style mirror with edge repeat: pixel[-1] = pixel[0],
+//   Mirror      = Mirror with edge repeat: pixel[-1] = pixel[0],
 //                 pixel[-2] = pixel[1], ... pixel[w] = pixel[w-1].
-//                 (fssimu2 uses a *no-edge-repeat* mirror — pixel[-1] = pixel[1]
-//                 — which we don't currently expose.)
 enum BlurWrapMode {
     BlurWrapMode_ClampEdge   = 0,
     BlurWrapMode_ClampBorder = 1,
@@ -112,12 +110,12 @@ IC_VAR_INT(ssimu2_blur_wrap_mode, BlurWrapMode_ClampEdge);
 #endif
 
 // Weight-based pruning. SSIMULACRA2's score is a weighted sum of 108 sub-scores
-// (3 components x 6 scales x 3 maps x 2 norms), and many weights are exactly 0 —
-// a whole (component, scale, map) can contribute nothing. We skip the blurs,
+// (3 components x 6 scales x 3 maps x 2 norms), and many weights are exactly 0.
+// A whole (component, scale, map) can contribute nothing. We skip the blurs,
 // multiplies, and map kernel for any sub-score whose weights (both norms) are
 // <= this threshold:
 //   < 0   disables pruning (compute everything; the pre-pruning behavior).
-//   0.0   prunes only exact-zero weights — lossless.
+//   0.0   prunes only exact-zero weights (lossless).
 //   > 0   prunes small weights too for a tiny, bounded score change.
 // Default 0.01 (matching vapoursynth-zip): ~25-30% faster than no pruning, with
 // a measured score shift of at most +0.0006 across our test set — well under the
@@ -481,7 +479,7 @@ static inline float sample_h(const float* JXL_RESTRICT row, isize xi, isize w, i
   if (xi >= 0 && xi < w) return row[xi];
   if (mode == BlurWrapMode_ClampBorder) return 0.0f;
   if (mode == BlurWrapMode_Mirror) {
-    // RAD mirror with edge repeat: pixel[-1] = pixel[0], pixel[w] = pixel[w-1].
+    // Mirror with edge repeat: pixel[-1] = pixel[0], pixel[w] = pixel[w-1].
     isize mxi = (xi < 0) ? (-xi - 1) : (2 * w - xi - 1);
     return row[clamp(mxi, (isize)0, w - 1)]; // extra clamp protects tiny w
   }
@@ -549,7 +547,7 @@ IC_FORCEINLINE f32x8 mul(f32x8 a, float s) {
   return { _mm256_mul_ps(a.v, _mm256_set1_ps(s)) };
 }
 
-// acc + vec * scalar — uses VFMADD231PS via _mm256_fmadd_ps(v, scalar, acc).
+// acc + vec * scalar - uses VFMADD231PS via _mm256_fmadd_ps(v, scalar, acc).
 IC_FORCEINLINE f32x8 fma(f32x8 acc, f32x8 v, float s) {
   return { _mm256_fmadd_ps(v.v, _mm256_set1_ps(s), acc.v) };
 }
@@ -564,7 +562,7 @@ static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const
 
   // Snapshot the right half of the symmetric kernel into a stack array.
   // With just JXL_RESTRICT the compiler was reloading kernel[r+i] every
-  // iteration — measured ~5% slower. R constexpr lets the i loops unroll.
+  // iteration, measured ~5% slower. R constexpr lets the i loops unroll.
   // Used by all three sections (border, NEON interior, scalar interior).
   constexpr int R = kBlurRadius;
   float kloc[R + 1];
@@ -1409,7 +1407,7 @@ double ic_ssim_score(int w, int h, const unsigned char* orig, const unsigned cha
 
 
 // MS-SSIM (Multi-Scale SSIM), Wang/Simoncelli/Bovik 2003. Same Gaussian,
-// C1/C2 and Rec.601-luma input as ic_ssim_score — at scale 0, MS-SSIM and
+// C1/C2 and Rec.601-luma input as ic_ssim_score. At scale 0, MS-SSIM and
 // SSIM use the same per-pixel formula.
 //
 // At each scale j we compute pixel-wise SSIM = l·cs and CS, take their mean
@@ -1420,8 +1418,7 @@ double ic_ssim_score(int w, int h, const unsigned char* orig, const unsigned cha
 // compute in log space and divide by the sum of *used* weights so the
 // score still makes sense when small images can't reach all 5 scales.
 
-// 2×2 box-average downsample for a single plane. In-place safe in
-// row-major order — output stride < input stride so writes always lag reads.
+// 2×2 box-average downsample for a single plane. Safe to use in place.
 static void DownsampleAvg2(const ImageF& in, ImageF* out) {
   const size_t out_w = out->xsize();
   const size_t out_h = out->ysize();
