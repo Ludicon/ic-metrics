@@ -48,20 +48,20 @@ Measured on an Apple M4 Pro (10 P-core + 4 E-core).
 | 1024 × 1024 |    43 ms |     16 ms |     16 ms |
 | 4096 × 4096 |   771 ms |    241 ms |    193 ms |
 
-Single-thread is what `main` ships. The multi-thread numbers above are from the `omp-experiment` branch, which adds `#pragma omp parallel for` to the row loops and reductions to the two map kernels. Past ~4 threads the inner blur passes become memory-bandwidth-bound, so scaling tapers off.
+The multi-thread numbers above are from the `omp-experiment` branch, which adds `#pragma omp parallel for` to the row loops and reductions to the two map kernels. Past ~4 threads the inner blur passes become memory-bandwidth-bound, so scaling tapers off. These figures predate the default weight pruning, so they isolate thread scaling alone; current `main` single-thread is faster (see the comparison table below).
 
 **Vs. other SSIMULACRA 2 implementations** (single-thread):
 
 | implementation           | 1024 × 1024 | 4096 × 4096 | notes |
 |---|---:|---:|---|
-| `ic-metrics` (this)      |     43 ms   |    771 ms   | NEON / AVX2 path |
-| [fssimu2]                |     45 ms   |    771 ms   | Zig port |
-| [vszip]                  |     68 ms   |   1023 ms   | Zig, from the vapoursynth-zip plugin |
-| [cloudinary/ssimulacra2] |     74 ms   |   1204 ms   | reference C++, SIMD via Highway |
-| [fast-ssim2]             |     54 ms   |   1237 ms   | Rust, SIMD-accelerated |
-| [rust-av/ssimulacra2]    |     85 ms   |   1560 ms   | Rust port |
+| `ic-metrics` (this)      |     29 ms   |    510 ms   | NEON / AVX2 path, default weight pruning |
+| [fssimu2]                |     43 ms   |    757 ms   | Zig port |
+| [vszip]                  |     63 ms   |   1010 ms   | Zig, from the vapoursynth-zip plugin, weight pruning |
+| [cloudinary/ssimulacra2] |     71 ms   |   1212 ms   | reference C++, SIMD via Highway |
+| [fast-ssim2]             |     48 ms   |   1280 ms   | Rust, SIMD-accelerated |
+| [rust-av/ssimulacra2]    |     82 ms   |   1575 ms   | Rust port |
 
-Median across `self` + JPEG q40/q70/q90 distortions, 10 iterations per cell, `bench --threads 1`.
+Median across `self` + JPEG q40/q70/q90 distortions, 10 iterations per cell, `bench --threads 1`. `ic-metrics` and `vszip` run with their default weight pruning (see [Differences](#differences)); the rest compute every sub-score.
 
 [cloudinary/ssimulacra2]: https://github.com/cloudinary/ssimulacra2
 [rust-av/ssimulacra2]:    https://github.com/rust-av/ssimulacra2
