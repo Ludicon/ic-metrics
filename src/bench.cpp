@@ -6,12 +6,13 @@
 // iterations of the score function. Reports CSV with median / p10 / p90 ms
 // plus the final score (sanity check).
 //
-// CLI:  bench [--iters N] [--threads K] [--impl X] [data_dir]
+// CLI:  bench [--iters N] [--threads K] [--impl X] [--config FILE] [data_dir]
 //   --iters N      iterations per cell, default 5
 //   --threads K    request K threads per impl. Sets RAYON_NUM_THREADS for
 //                  rust-av. ours/fssimu2/cloudinary are single-threaded today
 //                  (Phase 4 will add equivalent controls).
-//   --impl X       run only impl X (ours|fssimu2|rust-av|cloudinary)
+//   --impl X       run only impl X (ours|fssimu2|rust-av|cloudinary|fast-ssim2|vszip)
+//   --config FILE  load ic_vars overrides from FILE (e.g. ssimu2_prune_threshold)
 //   data_dir       defaults to "data"
 
 #include "harness.h"
@@ -186,6 +187,11 @@ int main(int argc, char** argv) {
         }
         else if (strcmp(argv[i], "--impl") == 0 && i + 1 < argc) {
             g_impl_filter = argv[++i];
+        }
+        else if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
+            // Load var overrides (e.g. ssimu2_prune_threshold) from a file
+            // without recompiling. Format: one "name value" per line.
+            ic_vars_load_config(argv[++i], false);
         }
         else if (strcmp(argv[i], "--no-simd") == 0) {
             var::ssimu2_blur_simd = false;

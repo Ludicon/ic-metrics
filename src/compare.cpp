@@ -9,10 +9,12 @@
 #include "harness.h"
 #include "ic_shared.h"
 #include "ic_metrics.h"
+#include "ic_vars.h"
 #include "impls.h"
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 
 ////////////////////////////////
@@ -97,7 +99,22 @@ static void process_image(const char* path, void* /*ctx*/) {
 // Entry
 
 int main(int argc, char** argv) {
-    const char* data_dir = (argc > 1) ? argv[1] : "data";
+    const char* data_dir = "data";
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
+            // Load var overrides (e.g. ssimu2_prune_threshold) from a file
+            // without recompiling. Format: one "name value" per line.
+            ic_vars_load_config(argv[++i], false);
+        }
+        else if (argv[i][0] == '-') {
+            fprintf(stderr, "compare: unknown flag %s\n", argv[i]);
+            return 1;
+        }
+        else {
+            data_dir = argv[i];
+        }
+    }
 
     int n = harness_for_each_png(data_dir, nullptr, nullptr);
     if (n < 0) {
