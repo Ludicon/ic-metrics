@@ -71,10 +71,11 @@ Median across `self` + JPEG q40/q70/q90 distortions, 10 iterations per cell, `be
 
 ## Differences
 
-Scores are *not* bit-exact with [cloudinary/ssimulacra2]; in practice they match to within ~0.01 across our test set, but two deliberate deviations in the Gaussian blur are responsible for the drift.
+Scores are *not* bit-exact with [cloudinary/ssimulacra2]; in practice they match to within ~0.01 across our test set, but a few deliberate deviations are responsible for the drift.
 
 - **Filter form.** Cloudinary uses a single-pass recursive (IIR) Gaussian approximation. We use the textbook separable two-pass FIR. It's easier to understand and trivial to optimize. The two filters have the same intent but produce slightly different results.
 - **Border handling.** Cloudinary samples out-of-image taps as zero (clamp-to-border), which artificially attenuates error along the image edges. The error map fades toward black in a 4-pixel rim regardless of what's actually there. We mirror-extend instead, so border pixels are scored the same way interior pixels are. This is the larger of the two contributions to the score drift.
+- **Weight pruning.** SSIMULACRA2 sums 108 weighted sub-scores; many of the trained weights are ~0. We skip the blurs and map kernels for any sub-score whose weight is below `ssimu2_prune_threshold` (default `0.01`, matching [vszip]), which is ~25–30% faster than computing everything. The measured score shift is at most +0.0006 across our set; set the threshold to `0.0` for the lossless subset (exact-zero weights only) or a negative value to disable it.
 
 ## Error map
 
