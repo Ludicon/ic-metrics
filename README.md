@@ -46,7 +46,7 @@ Measured on an Apple M4 Pro (10 P-core + 4 E-core).
 | size        | 1 thread | 4 threads | 8 threads |
 | ----------- | -------: | --------: | --------: |
 | 1024 × 1024 |    43 ms |     16 ms |     16 ms |
-| 4096 × 4096 |   767 ms |    241 ms |    193 ms |
+| 4096 × 4096 |   771 ms |    241 ms |    193 ms |
 
 Single-thread is what `main` ships. The multi-thread numbers above are from the `omp-experiment` branch, which adds `#pragma omp parallel for` to the row loops and reductions to the two map kernels. Past ~4 threads the inner blur passes become memory-bandwidth-bound, so scaling tapers off.
 
@@ -54,16 +54,20 @@ Single-thread is what `main` ships. The multi-thread numbers above are from the 
 
 | implementation           | 1024 × 1024 | 4096 × 4096 | notes |
 |---|---:|---:|---|
-| `ic-metrics` (this)      |     43 ms   |    767 ms   | NEON / AVX2 path |
-| [fssimu2]                |     43 ms   |    759 ms   | Zig port |
-| [cloudinary/ssimulacra2] |     73 ms   |   1203 ms   | reference C++, SIMD via Highway |
-| [rust-av/ssimulacra2]    |     84 ms   |   1541 ms   | Rust port |
+| `ic-metrics` (this)      |     43 ms   |    771 ms   | NEON / AVX2 path |
+| [fssimu2]                |     45 ms   |    771 ms   | Zig port |
+| [vszip]                  |     68 ms   |   1023 ms   | Zig, from the vapoursynth-zip plugin |
+| [cloudinary/ssimulacra2] |     74 ms   |   1204 ms   | reference C++, SIMD via Highway |
+| [fast-ssim2]             |     54 ms   |   1237 ms   | Rust, SIMD-accelerated |
+| [rust-av/ssimulacra2]    |     85 ms   |   1560 ms   | Rust port |
 
-Median across `self` + JPEG q40/q70/q90 distortions, 10 iterations per cell, `bench --impl all --threads 1` on the `omp-experiment` branch.
+Median across `self` + JPEG q40/q70/q90 distortions, 10 iterations per cell, `bench --threads 1`.
 
 [cloudinary/ssimulacra2]: https://github.com/cloudinary/ssimulacra2
 [rust-av/ssimulacra2]:    https://github.com/rust-av/ssimulacra2
 [fssimu2]:                https://github.com/gianni-rosato/fssimu2
+[fast-ssim2]:             https://github.com/imazen/fast-ssim2
+[vszip]:                  https://github.com/dnjulek/vapoursynth-zip
 
 ## Differences
 
@@ -94,7 +98,7 @@ CMake (≥ 3.20) is the only requirement. The `omp-experiment` branch additional
 The repo also ships two example tools:
 
 - **`ssimudiff`** — score two PNGs and write an error-map PNG: `ssimudiff orig.png dist.png error.png`
-- **`bench` / `compare`** — perf and cross-implementation correctness harnesses (compare against [cloudinary/ssimulacra2](https://github.com/cloudinary/ssimulacra2), [rust-av/ssimulacra2](https://github.com/rust-av/ssimulacra2), and [fssimu2](https://github.com/gianni-rosato/fssimu2) when their submodules are checked out under `extern/`).
+- **`bench` / `compare`** — perf and cross-implementation correctness harnesses (compare against [cloudinary/ssimulacra2](https://github.com/cloudinary/ssimulacra2), [rust-av/ssimulacra2](https://github.com/rust-av/ssimulacra2), [fssimu2](https://github.com/gianni-rosato/fssimu2), [fast-ssim2](https://github.com/imazen/fast-ssim2), and [vszip](https://github.com/dnjulek/vapoursynth-zip) when their submodules are checked out under `extern/`).
 
 ## AI Disclaimer
 
