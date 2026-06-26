@@ -766,7 +766,7 @@ static void MultiplyPlane(const ImageF &a, const ImageF &b, ImageF *mul) {
   ic_assert(a.xsize() == b.xsize() && a.ysize() == b.ysize());
   ic_assert(a.xsize() == mul->xsize() && a.ysize() == mul->ysize());
   #pragma omp parallel for
-  for (size_t y = 0; y < a.ysize(); ++y) {
+  for (isize y = 0; y < (isize)a.ysize(); ++y) {
     const float *JXL_RESTRICT in1 = a.Row(y);
     const float *JXL_RESTRICT in2 = b.Row(y);
     float *JXL_RESTRICT out = mul->Row(y);
@@ -1353,7 +1353,7 @@ double ic_ssim_score(int w, int h, const unsigned char* orig, const unsigned cha
     float* row1 = img1.data;
     float* row2 = img2.data;
     #pragma omp parallel for
-    for (size_t i = 0; i < n; i++) {
+    for (isize i = 0; i < (isize)n; i++) {
       row1[i] = kR * orig[4*i + 0] + kG * orig[4*i + 1] + kB * orig[4*i + 2];
       row2[i] = kR * dist[4*i + 0] + kG * dist[4*i + 1] + kB * dist[4*i + 2];
     }
@@ -1380,13 +1380,13 @@ double ic_ssim_score(int w, int h, const unsigned char* orig, const unsigned cha
     const float* p2 = img2.data;
     float* pt = tmp.data;
     #pragma omp parallel for
-    for (size_t i = 0; i < n; i++) pt[i] = p1[i] * p1[i];
+    for (isize i = 0; i < (isize)n; i++) pt[i] = p1[i] * p1[i];
     blur(tmp, &sigma1_sq);
     #pragma omp parallel for
-    for (size_t i = 0; i < n; i++) pt[i] = p2[i] * p2[i];
+    for (isize i = 0; i < (isize)n; i++) pt[i] = p2[i] * p2[i];
     blur(tmp, &sigma2_sq);
     #pragma omp parallel for
-    for (size_t i = 0; i < n; i++) pt[i] = p1[i] * p2[i];
+    for (isize i = 0; i < (isize)n; i++) pt[i] = p1[i] * p2[i];
     blur(tmp, &sigma12);
   }
 
