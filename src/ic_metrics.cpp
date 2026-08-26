@@ -1310,36 +1310,16 @@ size_t ic_ssim_score_scratch_size(int w, int h) {
   return usize(w) * usize(h) * sizeof(float) * 9;
 }
 
-double ic_ssim_score(int w, int h, const unsigned char* orig, const unsigned char* dist, void* scratch_ptr, unsigned char* error_map) {
-  JXL_PROFILE_FUNC
-
-  ScratchBuffer scratch = { scratch_ptr, ic_ssim_score_scratch_size(w, h), 0 };
-
+// Shared core of ic_ssim_score / ic_ssim_score_channel: single-scale SSIM over
+// two [0,1] planes the caller has already extracted into img1/img2. Consumes
+// the remaining 7 planes of the caller's scratch (blur temp, mu, sigma).
+static double ssim_plane_score(int w, int h, ImageF& img1, ImageF& img2, ScratchBuffer& scratch, unsigned char* error_map) {
   // Standard SSIM constants for [0,1] range (Wang et al. 2004).
   // C1 = (K1*L)^2, C2 = (K2*L)^2, with K1=0.01, K2=0.03, L=1.
   static const float kC1 = 0.0001f;
   static const float kC2 = 0.0009f;
 
-  ImageF img1(w, h, scratch);
-  ImageF img2(w, h, scratch);
-
-  // RGBA8 → Rec.601 luma in [0,1]. Standard SSIM operates on
-  // gamma-corrected luma (i.e. the sRGB bytes directly, no
-  // linearization).
-  constexpr float kR = 0.299f / 255.0f;
-  constexpr float kG = 0.587f / 255.0f;
-  constexpr float kB = 0.114f / 255.0f;
-
   const size_t n = size_t(w) * size_t(h);
-
-  {
-    float* row1 = img1.data;
-    float* row2 = img2.data;
-    for (size_t i = 0; i < n; i++) {
-      row1[i] = kR * orig[4*i + 0] + kG * orig[4*i + 1] + kB * orig[4*i + 2];
-      row2[i] = kR * dist[4*i + 0] + kG * dist[4*i + 1] + kB * dist[4*i + 2];
-    }
-  }
 
   Blur blur(w, h, scratch);
 
@@ -1403,6 +1383,62 @@ double ic_ssim_score(int w, int h, const unsigned char* orig, const unsigned cha
   }
 
   return ssim_sum * one_per_pixels;
+}
+
+double ic_ssim_score(int w, int h, const unsigned char* orig, const unsigned char* dist, void* scratch_ptr, unsigned char* error_map) {
+  JXL_PROFILE_FUNC
+
+  ScratchBuffer scratch = { scratch_ptr, ic_ssim_score_scratch_size(w, h), 0 };
+
+  ImageF img1(w, h, scratch);
+  ImageF img2(w, h, scratch);
+
+  // RGBA8 -> Rec.601 luma in [0,1]. Standard SSIM operates on
+  // gamma-corrected luma (i.e. the sRGB bytes directly, no
+  // linearization).
+  constexpr float kR = 0.299f / 255.0f;
+  constexpr float kG = 0.587f / 255.0f;
+  constexpr float kB = 0.114f / 255.0f;
+
+  const size_t n = size_t(w) * size_t(h);
+
+  {
+    float* row1 = img1.data;
+    float* row2 = img2.data;
+    for (size_t i = 0; i < n; i++) {
+      row1[i] = kR * orig[4*i + 0] + kG * orig[4*i + 1] + kB * orig[4*i + 2];
+      row2[i] = kR * dist[4*i + 0] + kG * dist[4*i + 1] + kB * dist[4*i + 2];
+    }
+  }
+
+  return ssim_plane_score(w, h, img1, img2, scratch, error_map);
+}
+
+double ic_ssim_score_channel(int w, int h, const unsigned char* orig, const unsigned char* dist, void* scratch_ptr, int channel, unsigned char* error_map) {
+  JXL_PROFILE_FUNC
+
+  ic_assert(channel >= 0 && channel < 4);
+
+  ScratchBuffer scratch = { scratch_ptr, ic_ssim_score_scratch_size(w, h), 0 };
+
+  ImageF img1(w, h, scratch);
+  ImageF img2(w, h, scratch);
+
+  // One plane of the RGBA8 input, bytes mapped to [0,1]. No luma projection:
+  // for non-color data (normal XY, roughness, alpha) mixing channels would let
+  // cross-channel errors cancel.
+  const size_t n = size_t(w) * size_t(h);
+
+  {
+    float* row1 = img1.data;
+    float* row2 = img2.data;
+    for (size_t i = 0; i < n; i++) {
+      row1[i] = float(orig[4*i + channel]) / 255.0f;
+      row2[i] = float(dist[4*i + channel]) / 255.0f;
+    }
+  }
+
+  return ssim_plane_score(w, h, img1, img2, scratch, error_map);
 }
 
 

@@ -32,6 +32,14 @@ size_t ic_ssim_score_scratch_size(int w, int h);
 double ic_ssim_score(int w, int h, const unsigned char *orig, const unsigned char *dist, void *scratch_ptr,
                      unsigned char *error_map = nullptr);
 
+// Single-channel SSIM: same metric as ic_ssim_score but computed on one plane
+// of the RGBA8 input (channel 0-3, bytes mapped to [0,1]) instead of Rec.601
+// luma. Useful for non-color data (normal XY, roughness, alpha) where a luma
+// projection would mix channels and let cross-channel errors cancel. Same
+// scratch-buffer pattern and size as ic_ssim_score.
+double ic_ssim_score_channel(int w, int h, const unsigned char *orig, const unsigned char *dist, void *scratch_ptr,
+                             int channel, unsigned char *error_map = nullptr);
+
 // MS-SSIM (Multi-Scale SSIM) — Wang/Simoncelli/Bovik 2003. Same RGBA8 input
 // and scratch-buffer pattern as ic_ssim_score. Score is in [0, 1] (1 means
 // identical). The optional error_map is filled at the finest scale.

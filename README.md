@@ -37,6 +37,8 @@ free(scratch);
 
 `ic_ssim_score` and `ic_msssim_score` have exactly the same API, but compute the SSIM and MS-SSIM metrics respectively.
 
+`ic_ssim_score_channel` computes single-channel SSIM on one plane of the RGBA8 input (channel 0-3) instead of Rec.601 luma. This is intended for non-color data (normal XY, roughness, alpha) where a luma projection would mix channels and let cross-channel errors cancel.
+
 ## Performance
 
 Measured on an Apple M4 Pro (10 P-core + 4 E-core).
