@@ -121,6 +121,35 @@ IC_VAR_INT(ssimu2_blur_wrap_mode, BlurWrapMode_ClampEdge);
 // ~0.01 agreement with the cloudinary reference. Set to 0.0 for bit-exact scores.
 IC_VAR_FLOAT(ssimu2_prune_threshold, 0.01f);
 
+// IW-SSIM: evaluate the per-pixel weight as one log2 of the product of the
+// per-component terms instead of a sum of 10 log2f calls. The product is a
+// fixed polynomial of the eigenvalues evaluated by Horner's rule in double
+// (its terms reach ~1e8 each, so float would overflow).
+IC_VAR_BOOL(iwssim_log_product, true);
+
+// IW-SSIM: evaluate the GSM multiplier s^2 = v^T C_u^-1 v as |R v|^2 with R
+// the Cholesky factor of C_u^-1 (upper triangular, 55 FMAs for n = 10)
+// instead of projecting v onto all n eigenvectors (n^2 = 100 FMAs). Both are
+// sums of squares, so neither cancels; the plain symmetric quadratic form
+// would, since C_u^-1 holds inverse eigenvalues.
+IC_VAR_BOOL(iwssim_cholesky_projection, true);
+
+// IW-SSIM: build the neighborhood covariance from SIMD dot products of
+// shifted rows (converted to double once per row) instead of gathering a
+// 10-vector per pixel and accumulating its outer product in scalar double.
+// Same double arithmetic, so results match to rounding.
+IC_VAR_BOOL(iwssim_simd_covariance, true);
+
+// IW-SSIM: run the per-pixel weight pass (s^2, block statistics, weight,
+// CS) eight pixels at a time with f32x8. The scalar path handles row tails
+// and serves as the reference variant. The vector path uses a polynomial
+// log2 accurate to ~2e-7 absolute; score differences are at rounding level.
+#if IC_HAS_F32X8
+    IC_VAR_BOOL(iwssim_simd_weights, true);
+#else
+    IC_VAR_BOOL(iwssim_simd_weights, false);
+#endif
+
 
 #define JXL_RESTRICT __restrict
 
@@ -523,6 +552,58 @@ IC_FORCEINLINE f32x8 fma(f32x8 acc, f32x8 v, float s) {
   return { vfmaq_n_f32(acc.lo, v.lo, s), vfmaq_n_f32(acc.hi, v.hi, s) };
 }
 
+IC_FORCEINLINE f32x8 set1(float s) {
+  return { vdupq_n_f32(s), vdupq_n_f32(s) };
+}
+
+IC_FORCEINLINE f32x8 sub(f32x8 a, f32x8 b) {
+  return { vsubq_f32(a.lo, b.lo), vsubq_f32(a.hi, b.hi) };
+}
+
+IC_FORCEINLINE f32x8 mul(f32x8 a, f32x8 b) {
+  return { vmulq_f32(a.lo, b.lo), vmulq_f32(a.hi, b.hi) };
+}
+
+IC_FORCEINLINE f32x8 div(f32x8 a, f32x8 b) {
+  return { vdivq_f32(a.lo, b.lo), vdivq_f32(a.hi, b.hi) };
+}
+
+// acc + a * b
+IC_FORCEINLINE f32x8 fma(f32x8 acc, f32x8 a, f32x8 b) {
+  return { vfmaq_f32(acc.lo, a.lo, b.lo), vfmaq_f32(acc.hi, a.hi, b.hi) };
+}
+
+// All-ones lanes where a < b, as a float-typed mask for select().
+IC_FORCEINLINE f32x8 lt(f32x8 a, f32x8 b) {
+  return { vreinterpretq_f32_u32(vcltq_f32(a.lo, b.lo)), vreinterpretq_f32_u32(vcltq_f32(a.hi, b.hi)) };
+}
+
+// mask ? a : b, per lane.
+IC_FORCEINLINE f32x8 select(f32x8 mask, f32x8 a, f32x8 b) {
+  return { vbslq_f32(vreinterpretq_u32_f32(mask.lo), a.lo, b.lo), vbslq_f32(vreinterpretq_u32_f32(mask.hi), a.hi, b.hi) };
+}
+
+// Unbiased exponent of positive normal floats, as floats.
+IC_FORCEINLINE float32x4_t exponent4(float32x4_t x) {
+  return vcvtq_f32_s32(vsubq_s32(vshrq_n_s32(vreinterpretq_s32_f32(x), 23), vdupq_n_s32(127)));
+}
+IC_FORCEINLINE f32x8 exponent(f32x8 x) {
+  return { exponent4(x.lo), exponent4(x.hi) };
+}
+
+// Mantissa of positive normal floats, in [1, 2).
+IC_FORCEINLINE float32x4_t mantissa4(float32x4_t x) {
+  uint32x4_t bits = vreinterpretq_u32_f32(x);
+  return vreinterpretq_f32_u32(vorrq_u32(vandq_u32(bits, vdupq_n_u32(0x007FFFFFu)), vdupq_n_u32(0x3F800000u)));
+}
+IC_FORCEINLINE f32x8 mantissa(f32x8 x) {
+  return { mantissa4(x.lo), mantissa4(x.hi) };
+}
+
+IC_FORCEINLINE float hsum(f32x8 v) {
+  return vaddvq_f32(vaddq_f32(v.lo, v.hi));
+}
+
 #elif IC_CPU_X64
 
 // AVX2 + FMA backend. CMake enables -mavx2 -mfma on x86_64 builds.
@@ -551,7 +632,157 @@ IC_FORCEINLINE f32x8 fma(f32x8 acc, f32x8 v, float s) {
   return { _mm256_fmadd_ps(v.v, _mm256_set1_ps(s), acc.v) };
 }
 
+IC_FORCEINLINE f32x8 set1(float s) {
+  return { _mm256_set1_ps(s) };
+}
+
+IC_FORCEINLINE f32x8 sub(f32x8 a, f32x8 b) {
+  return { _mm256_sub_ps(a.v, b.v) };
+}
+
+IC_FORCEINLINE f32x8 mul(f32x8 a, f32x8 b) {
+  return { _mm256_mul_ps(a.v, b.v) };
+}
+
+IC_FORCEINLINE f32x8 div(f32x8 a, f32x8 b) {
+  return { _mm256_div_ps(a.v, b.v) };
+}
+
+// acc + a * b
+IC_FORCEINLINE f32x8 fma(f32x8 acc, f32x8 a, f32x8 b) {
+  return { _mm256_fmadd_ps(a.v, b.v, acc.v) };
+}
+
+// All-ones lanes where a < b, as a float-typed mask for select().
+IC_FORCEINLINE f32x8 lt(f32x8 a, f32x8 b) {
+  return { _mm256_cmp_ps(a.v, b.v, _CMP_LT_OQ) };
+}
+
+// mask ? a : b, per lane.
+IC_FORCEINLINE f32x8 select(f32x8 mask, f32x8 a, f32x8 b) {
+  return { _mm256_blendv_ps(b.v, a.v, mask.v) };
+}
+
+// Unbiased exponent of positive normal floats, as floats.
+IC_FORCEINLINE f32x8 exponent(f32x8 x) {
+  __m256i e = _mm256_sub_epi32(_mm256_srli_epi32(_mm256_castps_si256(x.v), 23), _mm256_set1_epi32(127));
+  return { _mm256_cvtepi32_ps(e) };
+}
+
+// Mantissa of positive normal floats, in [1, 2).
+IC_FORCEINLINE f32x8 mantissa(f32x8 x) {
+  __m256i bits = _mm256_castps_si256(x.v);
+  bits = _mm256_or_si256(_mm256_and_si256(bits, _mm256_set1_epi32(0x007FFFFF)), _mm256_set1_epi32(0x3F800000));
+  return { _mm256_castsi256_ps(bits) };
+}
+
+IC_FORCEINLINE float hsum(f32x8 v) {
+  __m128 s = _mm_add_ps(_mm256_castps256_ps128(v.v), _mm256_extractf128_ps(v.v, 1));
+  s = _mm_add_ps(s, _mm_movehl_ps(s, s));
+  s = _mm_add_ss(s, _mm_shuffle_ps(s, s, 1));
+  return _mm_cvtss_f32(s);
+}
+
 #endif // IC_CPU_*
+
+#if IC_HAS_F32X8
+// log2 of positive normal floats: exponent from the bits, then log2 of the
+// mantissa m in [1, 2) from the atanh series in s = (m-1)/(m+1), |s| <= 1/3,
+// truncated after s^11. Absolute error below 2e-7.
+IC_FORCEINLINE f32x8 log2_approx(f32x8 x) {
+  const f32x8 one = set1(1.0f);
+  const f32x8 m = mantissa(x);
+  const f32x8 s = div(sub(m, one), add(m, one));
+  const f32x8 s2 = mul(s, s);
+  // 2/ln2 * (s + s^3/3 + s^5/5 + s^7/7 + s^9/9 + s^11/11), Horner in s^2.
+  f32x8 p = set1(2.8853900817779268f / 11.0f);
+  p = fma(set1(2.8853900817779268f / 9.0f), p, s2);
+  p = fma(set1(2.8853900817779268f / 7.0f), p, s2);
+  p = fma(set1(2.8853900817779268f / 5.0f), p, s2);
+  p = fma(set1(2.8853900817779268f / 3.0f), p, s2);
+  p = fma(set1(2.8853900817779268f), p, s2);
+  return fma(exponent(x), p, s);
+}
+#endif
+
+
+////////////////////////////////
+// 4-wide double helpers, same shape as f32x8: 2x NEON float64x2 on arm64,
+// 1x AVX 256-bit reg on x86_64. Used by the IW-SSIM covariance dot products,
+// which need double accumulation (see iwssim_simd_covariance).
+
+#if IC_CPU_ARM64
+
+#define IC_HAS_F64X4 1
+
+struct f64x4 {
+  float64x2_t lo;
+  float64x2_t hi;
+};
+
+IC_FORCEINLINE f64x4 load(const double* p) {
+  return { vld1q_f64(p), vld1q_f64(p + 2) };
+}
+
+IC_FORCEINLINE f64x4 zero_f64x4() {
+  return { vdupq_n_f64(0.0), vdupq_n_f64(0.0) };
+}
+
+// acc + a * b
+IC_FORCEINLINE f64x4 fma(f64x4 acc, f64x4 a, f64x4 b) {
+  return { vfmaq_f64(acc.lo, a.lo, b.lo), vfmaq_f64(acc.hi, a.hi, b.hi) };
+}
+
+IC_FORCEINLINE double hsum(f64x4 v) {
+  return vaddvq_f64(vaddq_f64(v.lo, v.hi));
+}
+
+#elif IC_CPU_X64
+
+#define IC_HAS_F64X4 1
+
+struct f64x4 {
+  __m256d v;
+};
+
+IC_FORCEINLINE f64x4 load(const double* p) {
+  return { _mm256_loadu_pd(p) };
+}
+
+IC_FORCEINLINE f64x4 zero_f64x4() {
+  return { _mm256_setzero_pd() };
+}
+
+IC_FORCEINLINE f64x4 fma(f64x4 acc, f64x4 a, f64x4 b) {
+  return { _mm256_fmadd_pd(a.v, b.v, acc.v) };
+}
+
+IC_FORCEINLINE double hsum(f64x4 v) {
+  __m128d lo = _mm256_castpd256_pd128(v.v);
+  __m128d hi = _mm256_extractf128_pd(v.v, 1);
+  __m128d s = _mm_add_pd(lo, hi);
+  return _mm_cvtsd_f64(_mm_add_sd(s, _mm_unpackhi_pd(s, s)));
+}
+
+#endif
+
+// Dot product of two double ranges. Two accumulators keep the FMA chain
+// short; the tail is scalar.
+static double dot_f64(const double* a, const double* b, isize count) {
+  isize i = 0;
+  double sum = 0.0;
+#if IC_HAS_F64X4
+  f64x4 acc0 = zero_f64x4();
+  f64x4 acc1 = zero_f64x4();
+  for (; i + 8 <= count; i += 8) {
+    acc0 = fma(acc0, load(a + i), load(b + i));
+    acc1 = fma(acc1, load(a + i + 4), load(b + i + 4));
+  }
+  sum = hsum(acc0) + hsum(acc1);
+#endif
+  for (; i < count; i++) sum += a[i] * b[i];
+  return sum;
+}
 
 
 static void ConvolveHorizontal(const ImageF& in, ImageF* JXL_RESTRICT out, const float* JXL_RESTRICT kernel) {
@@ -1854,9 +2085,10 @@ static inline float ssim_cs_terms(float m1, float m2, float p11, float p22, floa
 // our test set, flat and near-flat crops included). The pooled totals are
 // accumulated per row and flushed to double; the covariance and the small
 // eigen-solve run in double.
+// row_scratch holds 4 * ref.xsize() doubles for the SIMD covariance path.
 static double iw_pooled_cs(const ImageF& ref, const ImageF& dst, const ImageF* parent,
                            const ImageF& mu1, const ImageF& mu2, const ImageF& p11, const ImageF& p22, const ImageF& p12,
-                           float c1, float c2) {
+                           float c1, float c2, double* row_scratch) {
   const isize w = ref.xsize();
   const isize h = ref.ysize();
   const int n = parent ? kIwMaxN : kIwMaxN - 1;
@@ -1866,12 +2098,44 @@ static double iw_pooled_cs(const ImageF& ref, const ImageF& dst, const ImageF* p
   // off-diagonal entries cancel heavily, and the smallest eigenvalues (which
   // the s^2 estimate divides by) sit well below float rounding of the sums.
   double cov[kIwMaxN * kIwMaxN] = {};
-  for (isize y = 1; y < h - 1; y++) {
-    for (isize x = 1; x < w - 1; x++) {
-      float v[kIwMaxN];
-      iw_gather(ref, parent, x, y, v);
+  if (var::iwssim_simd_covariance) {
+    // Entry (i, j) is the dot product of two shifted rows of the reference
+    // band (or the upsampled parent row), summed over interior rows. Rows
+    // y-1, y, y+1 live in a sliding window of double copies; one new row is
+    // converted per y.
+    double* drow[3] = { row_scratch, row_scratch + w, row_scratch + 2 * w };
+    double* prow = row_scratch + 3 * w;
+    for (isize y = 0; y < 2; y++) {
+      const float* src = ref.Row(y);
+      for (isize x = 0; x < w; x++) drow[y][x] = src[x];
+    }
+    const isize count = w - 2;
+    for (isize y = 1; y < h - 1; y++) {
+      {
+        double* d = drow[(y + 1) % 3];
+        const float* src = ref.Row(y + 1);
+        for (isize x = 0; x < w; x++) d[x] = src[x];
+      }
+      if (parent) {
+        for (isize x = 1; x < w - 1; x++) prow[x] = parent_sample(*parent, x, y);
+      }
+      // Neighbor k = (dy + 1) * 3 + (dx + 1), same order as iw_gather.
+      const double* nb[kIwMaxN];
+      for (int k = 0; k < 9; k++) nb[k] = drow[(y + k / 3 - 1 + 3) % 3] + 1 + (k % 3 - 1);
+      if (parent) nb[9] = prow + 1;
       for (int i = 0; i < n; i++) {
-        for (int j = i; j < n; j++) cov[i * n + j] += double(v[i]) * double(v[j]);
+        for (int j = i; j < n; j++) cov[i * n + j] += dot_f64(nb[i], nb[j], count);
+      }
+    }
+  }
+  else {
+    for (isize y = 1; y < h - 1; y++) {
+      for (isize x = 1; x < w - 1; x++) {
+        float v[kIwMaxN];
+        iw_gather(ref, parent, x, y, v);
+        for (int i = 0; i < n; i++) {
+          for (int j = i; j < n; j++) cov[i * n + j] += double(v[i]) * double(v[j]);
+        }
       }
     }
   }
@@ -1897,32 +2161,169 @@ static double iw_pooled_cs(const ImageF& ref, const ImageF& dst, const ImageF* p
   }
   const double rescale = sum_pos > 0.0 ? sum_all / sum_pos : 0.0;
   float eig_f[kIwMaxN], inv_eig[kIwMaxN], q_f[kIwMaxN * kIwMaxN];
+  double inv_eig_d[kIwMaxN];
+  double coef[kIwMaxN + 1] = { 1.0 };   // prod_k (1 + t*eig_k) = sum_j coef[j] t^j
   for (int k = 0; k < n; k++) {
     const double e = eig[k] > 0.0 ? eig[k] * rescale : 0.0;
     eig_f[k] = float(e);
-    inv_eig[k] = e > 1e-12 * sum_all ? float(1.0 / e) : 0.0f;
+    inv_eig_d[k] = e > 1e-12 * sum_all ? 1.0 / e : 0.0;
+    inv_eig[k] = float(inv_eig_d[k]);
     for (int i = 0; i < n; i++) q_f[i * n + k] = float(q[i * n + k]);
+    for (int j = k + 1; j >= 1; j--) coef[j] += e * coef[j - 1];
+  }
+
+  // Upper-triangular R with R^T R = C_u^-1 = Q diag(inv_eig) Q^T, so that
+  // v^T C_u^-1 v = |R v|^2. Cholesky in double; dropped eigen-components make
+  // the matrix semi-definite, so a vanishing pivot zeroes its row.
+  float r_f[kIwMaxN * kIwMaxN] = {};
+  if (var::iwssim_cholesky_projection) {
+    double a[kIwMaxN * kIwMaxN];
+    for (int i = 0; i < n; i++) {
+      for (int j = 0; j < n; j++) {
+        double sum = 0.0;
+        for (int k = 0; k < n; k++) sum += q[i * n + k] * inv_eig_d[k] * q[j * n + k];
+        a[i * n + j] = sum;
+      }
+    }
+    double r[kIwMaxN * kIwMaxN] = {};
+    for (int i = 0; i < n; i++) {
+      double d = a[i * n + i];
+      for (int k = 0; k < i; k++) d -= r[k * n + i] * r[k * n + i];
+      if (d <= 1e-12 * a[i * n + i]) continue;   // row stays zero
+      const double rii = sqrt(d);
+      r[i * n + i] = rii;
+      for (int j = i + 1; j < n; j++) {
+        double sum = a[i * n + j];
+        for (int k = 0; k < i; k++) sum -= r[k * n + i] * r[k * n + j];
+        r[i * n + j] = sum / rii;
+      }
+    }
+    for (int i = 0; i < n * n; i++) r_f[i] = float(r[i]);
   }
 
   const float sigma_nsq = float(kIwSigmaNsq);
-  const float inv_nsq2 = float(1.0 / (kIwSigmaNsq * kIwSigmaNsq));
+  const double nsq2 = kIwSigmaNsq * kIwSigmaNsq;
+  const float inv_nsq2 = float(1.0 / nsq2);
   const float var_eps = float(kIwVarEps);
   const float weight_eps = float(kIwWeightEps);
 
   double wcs_sum = 0.0, w_sum = 0.0, cs_sum = 0.0;
   for (isize y = 1; y < h - 1; y++) {
     float row_wcs = 0.0f, row_w = 0.0f, row_cs = 0.0f;
-    for (isize x = 1; x < w - 1; x++) {
+    isize x = 1;
+
+#if IC_HAS_F32X8
+    if (var::iwssim_simd_weights && w - 2 >= 8) {
+      // Same math as the scalar loop below, eight pixels per step. The
+      // parent coefficient is upsampled once per row (the covariance pass
+      // is done with row_scratch by now).
+      float* prow_f = (float*)row_scratch;
+      if (parent) {
+        for (isize px = 1; px < w - 1; px++) prow_f[px] = parent_sample(*parent, px, y);
+      }
+      const f32x8 zero = set1(0.0f);
+      const f32x8 one = set1(1.0f);
+      const f32x8 veps = set1(var_eps);
+      const f32x8 vsigma = set1(sigma_nsq);
+      f32x8 acc_wcs = zero, acc_w = zero, acc_cs = zero;
+
+      for (; x + 8 <= w - 1; x += 8) {
+        f32x8 v[kIwMaxN];
+        f32x8 d[9];
+        for (int k = 0; k < 9; k++) {
+          const isize dy = k / 3 - 1, dx = k % 3 - 1;
+          v[k] = load(ref.Row(y + dy) + x + dx);
+          d[k] = load(dst.Row(y + dy) + x + dx);
+        }
+        if (parent) v[9] = load(prow_f + x);
+
+        // s^2 = |R v|^2 / n.
+        f32x8 ss = zero;
+        for (int i = 0; i < n; i++) {
+          if (r_f[i * n + i] == 0.0f) continue;
+          f32x8 acc = mul(v[i], r_f[i * n + i]);
+          for (int j = i + 1; j < n; j++) acc = fma(acc, v[j], r_f[i * n + j]);
+          ss = fma(ss, acc, acc);
+        }
+        ss = mul(ss, 1.0f / float(n));
+
+        // Two-pass block statistics.
+        f32x8 mr = v[0], md = d[0];
+        for (int k = 1; k < 9; k++) { mr = add(mr, v[k]); md = add(md, d[k]); }
+        mr = mul(mr, 1.0f / 9.0f);
+        md = mul(md, 1.0f / 9.0f);
+        f32x8 var_r = zero, var_d = zero, cov_rd = zero;
+        for (int k = 0; k < 9; k++) {
+          const f32x8 a = sub(v[k], mr), b = sub(d[k], md);
+          var_r = fma(var_r, a, a);
+          var_d = fma(var_d, b, b);
+          cov_rd = fma(cov_rd, a, b);
+        }
+        var_r = mul(var_r, 1.0f / 9.0f);
+        var_d = mul(var_d, 1.0f / 9.0f);
+        cov_rd = mul(cov_rd, 1.0f / 9.0f);
+        f32x8 g = div(cov_rd, add(var_r, veps));
+        f32x8 vv = sub(var_d, mul(g, cov_rd));
+        const f32x8 r_flat = lt(var_r, veps);
+        g = select(r_flat, zero, g);
+        vv = select(r_flat, var_d, vv);
+        const f32x8 d_flat = lt(var_d, veps);
+        g = select(d_flat, zero, g);
+        vv = select(d_flat, zero, vv);
+
+        // Weight: sum_k log2(1 + x_k) as the sum of the factors' exponents
+        // plus log2 of the product of their mantissas (ten values in
+        // [1, 2), so the product stays below 1024).
+        const f32x8 a = mul(add(vv, mul(add(mul(g, g), one), sigma_nsq)), ss);
+        const f32x8 b = mul(vv, vsigma);
+        f32x8 esum = zero, mprod = one;
+        for (int k = 0; k < n; k++) {
+          const f32x8 term = add(one, mul(fma(b, a, eig_f[k]), inv_nsq2));
+          esum = add(esum, exponent(term));
+          mprod = mul(mprod, mantissa(term));
+        }
+        f32x8 wgt = add(esum, log2_approx(mprod));
+        wgt = select(lt(wgt, set1(weight_eps)), zero, wgt);
+
+        // CS from the blurred moments.
+        const isize i0 = y * w + x;
+        const f32x8 m1 = load(mu1.data + i0), m2 = load(mu2.data + i0);
+        const f32x8 s1sq = sub(load(p11.data + i0), mul(m1, m1));
+        const f32x8 s2sq = sub(load(p22.data + i0), mul(m2, m2));
+        const f32x8 s12  = sub(load(p12.data + i0), mul(m1, m2));
+        const f32x8 cs = div(fma(set1(c2), s12, 2.0f), add(add(s1sq, s2sq), set1(c2)));
+
+        acc_wcs = fma(acc_wcs, wgt, cs);
+        acc_w = add(acc_w, wgt);
+        acc_cs = add(acc_cs, cs);
+      }
+      row_wcs += hsum(acc_wcs);
+      row_w   += hsum(acc_w);
+      row_cs  += hsum(acc_cs);
+    }
+#endif
+
+    for (; x < w - 1; x++) {
       float v[kIwMaxN];
       iw_gather(ref, parent, x, y, v);
 
       // GSM multiplier: s^2 = v^T C_u^-1 v / n.
       float ss = 0.0f;
-      for (int k = 0; k < n; k++) {
-        if (inv_eig[k] == 0.0f) continue;
-        float proj = 0.0f;
-        for (int i = 0; i < n; i++) proj += q_f[i * n + k] * v[i];
-        ss += proj * proj * inv_eig[k];
+      if (var::iwssim_cholesky_projection) {
+        for (int i = 0; i < n; i++) {
+          if (r_f[i * n + i] == 0.0f) continue;   // dropped component, whole row is zero
+          float acc = 0.0f;
+          for (int j = i; j < n; j++) acc += r_f[i * n + j] * v[j];
+          ss += acc * acc;
+        }
+      }
+      else {
+        for (int k = 0; k < n; k++) {
+          if (inv_eig[k] == 0.0f) continue;
+          float proj = 0.0f;
+          for (int i = 0; i < n; i++) proj += q_f[i * n + k] * v[i];
+          ss += proj * proj * inv_eig[k];
+        }
       }
       ss /= float(n);
 
@@ -1965,8 +2366,24 @@ static double iw_pooled_cs(const ImageF& ref, const ImageF& dst, const ImageF* p
       // summed over eigen-components.
       const float a = (vv + (1.0f + g * g) * sigma_nsq) * ss;
       const float b = sigma_nsq * vv;
-      float wgt = 0.0f;
-      for (int k = 0; k < n; k++) wgt += log2f(1.0f + (a * eig_f[k] + b) * inv_nsq2);
+      float wgt;
+      if (var::iwssim_log_product) {
+        // sum_k log2(1 + (a*eig_k + b)/s4) = log2((c/s4)^n * prod_k (1 + (a/c)*eig_k))
+        // with c = s4 + b, and the product is the precomputed polynomial in
+        // t = a/c. Everything is positive, so no cancellation anywhere.
+        const double c = double(b) + nsq2;
+        const double t = double(a) / c;
+        double poly = coef[n];
+        for (int j = n - 1; j >= 0; j--) poly = poly * t + coef[j];
+        const double cs4 = c * double(inv_nsq2);   // >= 1
+        double cs4n = cs4;
+        for (int k = 1; k < n; k++) cs4n *= cs4;
+        wgt = float(log2(cs4n * poly));
+      }
+      else {
+        wgt = 0.0f;
+        for (int k = 0; k < n; k++) wgt += log2f(1.0f + (a * eig_f[k] + b) * inv_nsq2);
+      }
       if (wgt < weight_eps) wgt = 0.0f;
 
       const isize i = y * w + x;
@@ -1999,10 +2416,12 @@ size_t ic_iwssim_score_scratch_size(int w, int h) {
   // below the current one for both images: lowpass and bandpass pairs at
   // half size and a lowpass pair at quarter size. Coarser scales reuse the
   // same buffers via ShrinkTo.
+  // Plus four double rows (three reference rows and the parent row) for the
+  // covariance dot products, with slack to align them.
   const usize full = usize(w) * usize(h);
   const usize w2 = (usize(w) + 1) / 2, h2 = (usize(h) + 1) / 2;
   const usize w4 = (w2 + 1) / 2, h4 = (h2 + 1) / 2;
-  return (9 * full + 4 * w2 * h2 + 2 * w4 * h4) * sizeof(float);
+  return (9 * full + 4 * w2 * h2 + 2 * w4 * h4) * sizeof(float) + 4 * usize(w) * sizeof(double) + 8;
 }
 
 double ic_iwssim_score(int w, int h, const unsigned char* orig, const unsigned char* dist, void* scratch_ptr, unsigned char* error_map) {
@@ -2054,6 +2473,14 @@ double ic_iwssim_score(int w, int h, const unsigned char* orig, const unsigned c
   ImageF sigma1_sq(w, h, scratch);
   ImageF sigma2_sq(w, h, scratch);
   ImageF sigma12(w, h, scratch);
+
+  // Double rows for the covariance pass, 8-byte aligned (planes are only
+  // float aligned).
+  double* row_scratch;
+  {
+    uintptr_t p = (uintptr_t)scratch.allocate(4 * size_t(w) * sizeof(double) + 8);
+    row_scratch = (double*)((p + 7) & ~uintptr_t(7));
+  }
 
   double log_iwssim = 0.0;
   double weights_used = 0.0;
@@ -2157,7 +2584,7 @@ double ic_iwssim_score(int w, int h, const unsigned char* orig, const unsigned c
           err_out[i] = MagmaMap[value];
         }
       }
-      contribution = iw_pooled_cs(cur[0], cur[1], parent, mu1, mu2, sigma1_sq, sigma2_sq, sigma12, kC1, kC2);
+      contribution = iw_pooled_cs(cur[0], cur[1], parent, mu1, mu2, sigma1_sq, sigma2_sq, sigma12, kC1, kC2, row_scratch);
     }
 
     if (contribution < 1e-10) contribution = 1e-10;  // guard the log
