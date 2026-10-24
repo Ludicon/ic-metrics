@@ -23,7 +23,7 @@ jobs:
       # org bandwidth quota and the docs PNG isn't needed to build.
       # No submodules: recursive — IC_METRICS_BUILD_COMPARE=OFF below
       # skips the third-party impls, so the submodules aren't needed.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           lfs: false
 
