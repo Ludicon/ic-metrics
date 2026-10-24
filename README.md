@@ -9,7 +9,7 @@ This code is based on [Cloudinary's SSIMULACRA2](https://github.com/cloudinary/s
 - build as a **single compilation unit** (`ic_metrics.cpp` + `ic_metrics.h`),
 - contain **no dependencies outside the C standard library** + compiler's SIMD intrinsics,
 - performs **no heap memory allocations** (caller passes a scratch buffer),
-- also provide **SSIM** and **MS-SSIM** implementations.
+- also provide **SSIM**, **MS-SSIM**, and **IW-SSIM** implementations.
 
 More metrics are planned.
 
@@ -37,20 +37,11 @@ free(scratch);
 
 `ic_ssim_score`, `ic_msssim_score` and `ic_iwssim_score` have exactly the same API, but compute the SSIM, MS-SSIM and IW-SSIM (information content weighted SSIM) metrics respectively.
 
-`ic_ssim_score_channel` computes single-channel SSIM on one plane of the RGBA8 input (channel 0-3) instead of Rec.601 luma. This is intended for non-color data (normal XY, roughness, alpha) where a luma projection would mix channels and let cross-channel errors cancel.
+`ic_ssim_score_channel` computes single-channel SSIM on one plane of the RGBA8 input (channel 0-3) instead of Rec.601 luma. This is intended for non-color data (normal XY, roughness, alpha).
 
 ## Performance
 
 Measured on an Apple M4 Pro (10 P-core + 4 E-core).
-
-**Scaling of this implementation:**
-
-| size        | 1 thread | 4 threads | 8 threads |
-| ----------- | -------: | --------: | --------: |
-| 1024 × 1024 |    43 ms |     16 ms |     16 ms |
-| 4096 × 4096 |   771 ms |    241 ms |    193 ms |
-
-The multi-thread numbers above are from the `omp-experiment` branch, which adds `#pragma omp parallel for` to the row loops and reductions to the two map kernels. These figures predate the default weight pruning, so they isolate thread scaling alone; current `main` single-thread is faster (see the comparison table below).
 
 **Vs. other SSIMULACRA 2 implementations:**
 
@@ -99,7 +90,7 @@ cmake -B build
 cmake --build build
 ```
 
-CMake (≥ 3.20) is the only requirement. The `omp-experiment` branch additionally needs an OpenMP runtime. On macOS: `brew install libomp`.
+CMake (≥ 3.20) and a C++ compiler are the only requirements.
 
 The repo also ships two example tools:
 
@@ -108,7 +99,7 @@ The repo also ships two example tools:
 
 ## AI Disclaimer
 
-The initial port of SSIMULACRA 2 was hand-authored. The surrounding scaffolding (CMake build, `bench`/`compare` harnesses, parallelization experiments, and this README) was developed with help from Claude (Anthropic).
+The initial port of SSIMULACRA 2 was hand-authored. The surrounding scaffolding (CMake build, `bench`/`compare` harnesses, and this README), weight pruning optimizations, and the IW-SSIM ipmlementation were developed with help from Claude.
 
 ## License
 
