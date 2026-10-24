@@ -49,3 +49,12 @@ double ic_ssim_score_channel(int w, int h, const unsigned char *orig, const unsi
 size_t ic_msssim_score_scratch_size(int w, int h);
 double ic_msssim_score(int w, int h, const unsigned char *orig, const unsigned char *dist, void *scratch_ptr,
                        unsigned char *error_map = nullptr);
+
+// IW-SSIM (Information Content Weighted SSIM) — Wang/Li 2011. Multi-scale
+// like MS-SSIM, but on a Laplacian pyramid, and the per-scale maps are pooled
+// with information-content weights from a Gaussian scale mixture model of
+// the reference instead of a plain mean. Same API, scratch-buffer pattern and
+// 8x8 minimum as ic_msssim_score; scratch size differs. Score is in [0, 1].
+size_t ic_iwssim_score_scratch_size(int w, int h);
+double ic_iwssim_score(int w, int h, const unsigned char *orig, const unsigned char *dist, void *scratch_ptr,
+                       unsigned char *error_map = nullptr);

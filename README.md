@@ -35,7 +35,7 @@ score = ic_ssimulacra2_score(w, h, orig_rgba, dist_rgba, scratch, error_map);
 free(scratch);
 ```
 
-`ic_ssim_score` and `ic_msssim_score` have exactly the same API, but compute the SSIM and MS-SSIM metrics respectively.
+`ic_ssim_score`, `ic_msssim_score` and `ic_iwssim_score` have exactly the same API, but compute the SSIM, MS-SSIM and IW-SSIM (information content weighted SSIM) metrics respectively.
 
 `ic_ssim_score_channel` computes single-channel SSIM on one plane of the RGBA8 input (channel 0-3) instead of Rec.601 luma. This is intended for non-color data (normal XY, roughness, alpha) where a luma projection would mix channels and let cross-channel errors cancel.
 
